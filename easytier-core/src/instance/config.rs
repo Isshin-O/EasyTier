@@ -203,6 +203,7 @@ impl CoreInstanceConfig {
         let peers = config
             .get_peers()
             .into_iter()
+            .filter(|peer| peer.enabled)
             .filter(|peer| host.accepts_runtime_url(&peer.uri))
             .collect::<Vec<_>>();
         let proxy_networks = if host.ignore_unsupported_config && !host.proxy_enabled {

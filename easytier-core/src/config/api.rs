@@ -51,12 +51,17 @@ pub fn network_config_from_toml(config: &TomlConfig) -> NetworkConfig {
     let peers = config.get_peers();
     result.networking_method = Some(NetworkingMethod::Manual as i32);
     if !peers.is_empty() {
-        result.peer_urls = peers.iter().map(|peer| peer.uri.to_string()).collect();
+        result.peer_urls = peers
+            .iter()
+            .filter(|peer| peer.enabled)
+            .map(|peer| peer.uri.to_string())
+            .collect();
         result.peers = peers
             .iter()
             .map(|peer| manage::NetworkPeerConfig {
                 uri: peer.uri.to_string(),
                 peer_public_key: peer.peer_public_key.clone(),
+                enabled: Some(peer.enabled),
             })
             .collect();
     }
