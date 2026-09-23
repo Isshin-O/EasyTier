@@ -260,7 +260,17 @@ function allFieldFixture() {
     ipv6_public_addr_auto: true,
     ipv6_public_addr_prefix: '2001:db8:1::/64',
     disable_relay_data: true,
+    prefer_peer_relay: true,
     enable_udp_broadcast_relay: true,
+    managed_credentials: [{
+      credential_id: 'managed-a',
+      credential_secret: 'managed-secret',
+      groups: ['ops'],
+      allow_relay: true,
+      allowed_proxy_cidrs: ['10.0.0.0/8'],
+      expiry_unix: '2000000000',
+      reusable: true,
+    }],
     socket_mark: 1234,
   }
 }
@@ -516,6 +526,7 @@ function assertPeerPublicKeysPreserved() {
     {
       uri: 'tcp://peer-a:11010',
       peer_public_key: 'peer-a-public-key',
+      enabled: true,
     },
   ])
 

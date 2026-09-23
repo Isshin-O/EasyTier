@@ -17,6 +17,7 @@ import { computed, ref, onMounted, onUnmounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AclManager from './acl/AclManager.vue'
 import UrlListInput from './UrlListInput.vue'
+import PeerListInput from './PeerListInput.vue'
 import { createVpnPortalConfig } from '../modules/vpnPortal'
 import type { VpnPortalClientConfig } from '../types/network'
 
@@ -209,6 +210,13 @@ function syncNormalizedNetwork(network: NetworkConfig | undefined): void {
 
 watch(() => curNetwork.value, syncNormalizedNetwork, { immediate: true, deep: false })
 
+watch(() => curNetwork.value.peers, (peers) => {
+  curNetwork.value.peer_urls = (peers ?? [])
+    .filter(peer => peer.enabled !== false)
+    .map(peer => peer.uri.trim())
+    .filter(uri => uri.length > 0)
+}, { deep: true })
+
 function parseInstanceRecvBpsLimitInput(value: string): number | string | null | undefined {
   const trimmed = value.trim()
   if (trimmed.length === 0) {
@@ -357,7 +365,7 @@ function removeVpnPortalClient(index: number) {
                     <span class="pi pi-question-circle ml-2 self-center" v-tooltip="t('initial_nodes_help')"></span>
                   </div>
                   <div class="items-center flex flex-col p-fluid gap-y-2">
-                    <UrlListInput id="initial_nodes" v-model="curNetwork.peer_urls" :protos="protos"
+                    <PeerListInput id="initial_nodes" v-model="curNetwork.peers" :protos="protos"
                       defaultUrl="tcp://:11010" :add-label="t('add_initial_node')"
                       :placeholder="t('initial_node_placeholder')" />
                   </div>

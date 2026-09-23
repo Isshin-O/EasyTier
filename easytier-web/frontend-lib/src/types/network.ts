@@ -85,10 +85,6 @@ interface NetworkingConfigFields {
   networking_method?: NetworkingMethod | string
 }
 
-interface NetworkingMethodOptions {
-  fillPeerUrlsFromPeers?: boolean
-}
-
 function emptyGroupInfo(): GroupInfo {
   return {
     declares: [],
@@ -183,6 +179,7 @@ export function DEFAULT_NETWORK_CONFIG(): NetworkConfig {
     networking_method: NetworkingMethod.Manual,
     public_server_url: '',
     peer_urls: [],
+    peers: [],
 
     proxy_cidrs: [],
 
@@ -221,6 +218,7 @@ function cleanNetworkPeers(peers: NetworkPeerConfig[] | undefined): NetworkPeerC
     .map((peer) => ({
       ...peer,
       uri: peer.uri.trim(),
+      enabled: peer.enabled !== false,
     }))
     .filter((peer) => peer.uri.length > 0)
 }
@@ -236,7 +234,12 @@ function peersFromUrls(urls: string[], existingPeers: NetworkPeerConfig[]): Netw
   return urls.map((uri) => ({
     ...(peersByUri.get(uri) ?? {}),
     uri,
+    enabled: peersByUri.get(uri)?.enabled !== false,
   }))
+}
+
+function activePeerUrls(peers: NetworkPeerConfig[]): string[] {
+  return peers.filter((peer) => peer.enabled !== false).map((peer) => peer.uri)
 }
 
 export function ensureAclRuleLists(rule: AclRule): AclRule {
@@ -326,36 +329,52 @@ function toBackendUint64(v: number | bigint | string | null | undefined): bigint
   }
 }
 
-function applyNetworkingMethod(
-  config: NetworkingConfigFields,
-  options: NetworkingMethodOptions = {},
-): void {
-  const existingPeers = cleanNetworkPeers(config.peers)
-  config.peer_urls = cleanPeerUrls(config.peer_urls)
-  if (options.fillPeerUrlsFromPeers && config.peer_urls.length === 0 && existingPeers.length > 0) {
-    config.peer_urls = existingPeers.map((peer) => peer.uri)
+function applyNetworkingMethod(config: NetworkingConfigFields, fillPeerUrlsFromPeers = false): void {
+  const configuredPeers = cleanNetworkPeers(config.peers)
+  const legacyPeerUrls = cleanPeerUrls(config.peer_urls)
+  let existingPeers = configuredPeers.length > 0
+    ? configuredPeers
+    : peersFromUrls(legacyPeerUrls, [])
+
+  if (
+    configuredPeers.length > 0
+    && !configuredPeers.some(peer => peer.enabled === false)
+    && (legacyPeerUrls.length > 0 || fillPeerUrlsFromPeers)
+  ) {
+    existingPeers = legacyPeerUrls.length > 0
+      ? peersFromUrls(legacyPeerUrls, configuredPeers)
+      : configuredPeers
+  }
+  else if (configuredPeers.some(peer => peer.enabled === false)) {
+    const knownUris = new Set(configuredPeers.map(peer => peer.uri))
+    const newPeers = peersFromUrls(legacyPeerUrls, configuredPeers)
+      .filter(peer => !knownUris.has(peer.uri))
+    existingPeers = [...configuredPeers, ...newPeers]
+  }
+  else if (configuredPeers.length > 0 && !fillPeerUrlsFromPeers && legacyPeerUrls.length === 0) {
+    existingPeers = []
   }
 
   const publicServerUrl = config.public_server_url?.trim() ?? ''
   const networkingMethod = config.networking_method ?? NetworkingMethod.Manual
+  let peers = existingPeers
 
   switch (networkingMethod) {
     case NetworkingMethod.PublicServer:
-      config.peer_urls = publicServerUrl
-        ? [publicServerUrl]
-        : (options.fillPeerUrlsFromPeers ? existingPeers.map((peer) => peer.uri) : [])
+      peers = publicServerUrl ? peersFromUrls([publicServerUrl], []) : []
       break
     case NetworkingMethod.Manual:
       break
     case NetworkingMethod.Standalone:
     default:
-      config.peer_urls = []
+      peers = []
       break
   }
 
   config.networking_method = NetworkingMethod.Manual
   config.public_server_url = ''
-  config.peers = peersFromUrls(config.peer_urls, existingPeers)
+  config.peers = peers
+  config.peer_urls = activePeerUrls(peers)
 }
 
 export function normalizeNetworkConfig(config: NetworkConfig): NetworkConfig {
@@ -363,7 +382,7 @@ export function normalizeNetworkConfig(config: NetworkConfig): NetworkConfig {
     ignoreUnknownFields: true,
   }) as unknown as NetworkConfig
 
-  applyNetworkingMethod(normalized, { fillPeerUrlsFromPeers: true })
+  applyNetworkingMethod(normalized, true)
   normalized.mtu = normalizeNumberForInput(normalized.mtu)
   normalized.instance_recv_bps_limit = normalizeUint64ForInput(
     normalized.instance_recv_bps_limit as any,
@@ -396,11 +415,28 @@ export function normalizeNetworkConfig(config: NetworkConfig): NetworkConfig {
 }
 
 export function toBackendNetworkConfig(config: NetworkConfig): NetworkConfig {
-  const backend = NetworkConfigPb.fromJson(prepareNetworkConfigForProtoJson(config) as any, {
+  const prepared = prepareNetworkConfigForProtoJson(config)
+  const backendInput = {
+    ...prepared,
+    peers: (config.peers ?? []).map(peer => ({
+      ...peer,
+      ...(peer.enabled === false ? { enabled: false } : {}),
+    })),
+    managed_credentials: (config.managed_credentials ?? []).map(credential => ({
+      ...credential,
+      expiry_unix: String(credential.expiry_unix ?? 0),
+    })),
+  }
+  const backend = NetworkConfigPb.fromJson(backendInput as any, {
     ignoreUnknownFields: true,
   })
 
   applyNetworkingMethod(backend)
+  backend.peers.forEach((peer) => {
+    if (peer.enabled === true) {
+      peer.enabled = undefined
+    }
+  })
   backend.mtu = normalizeNumberForInput(config.mtu) ?? undefined
   backend.instance_recv_bps_limit = toBackendUint64(config.instance_recv_bps_limit)
   if (config.acl === undefined || isAclEmpty(config.acl)) {
