@@ -250,6 +250,29 @@ const UrlListInputStub = defineComponent({
   },
 })
 
+const PeerListInputStub = defineComponent({
+  name: 'PeerListInput',
+  props: {
+    modelValue: Array,
+    id: String,
+    addLabel: String,
+  },
+  emits: ['update:modelValue'],
+  setup(props, { attrs, emit }) {
+    return () => h('input', {
+      ...attrs,
+      id: props.id,
+      value: (props.modelValue ?? []).map((peer: { uri: string }) => peer.uri).join(','),
+      'data-stub': 'peer-list-input',
+      'data-add-label': props.addLabel,
+      onInput: (event: Event) => emit('update:modelValue', splitList((event.target as HTMLInputElement).value).map(uri => ({
+        uri,
+        enabled: true,
+      }))),
+    })
+  },
+})
+
 const SelectButtonStub = defineComponent({
   name: 'SelectButton',
   props: {
@@ -380,6 +403,7 @@ function mountConfig(config: NetworkConfig = makeConfig()) {
         InputText: InputTextStub,
         MultiSelect: MultiSelectStub,
         Panel: PanelStub,
+        PeerListInput: PeerListInputStub,
         Password: PasswordStub,
         SelectButton: SelectButtonStub,
         ToggleButton: ToggleButtonStub,
@@ -665,5 +689,25 @@ describe('Config.vue network config projection', () => {
 
     expect(wrapper.emitted('runNetwork')?.[0]).toEqual([curNetwork])
     expect((wrapper.emitted('runNetwork')?.[0][0] as NetworkConfig).network_name).toBe('mesh-running')
+  })
+
+  it('preserves disabled peers while excluding them from active peer URLs', () => {
+    const config = DEFAULT_NETWORK_CONFIG()
+    config.peers = [
+      { uri: 'tcp://active:11010', enabled: true },
+      { uri: 'udp://paused:11010', enabled: false },
+    ]
+    config.peer_urls = []
+
+    const normalized = normalizeNetworkConfig(config)
+    expect(normalized.peers).toEqual(config.peers)
+    expect(normalized.peer_urls).toEqual(['tcp://active:11010'])
+
+    const backend = toBackendNetworkConfig(normalized)
+    expect(backend.peers).toEqual([
+      { uri: 'tcp://active:11010' },
+      { uri: 'udp://paused:11010', enabled: false },
+    ])
+    expect(backend.peer_urls).toEqual(['tcp://active:11010'])
   })
 })

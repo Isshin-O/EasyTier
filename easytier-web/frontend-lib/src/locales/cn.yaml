@@ -80,6 +80,9 @@ detail: 详情
 add_new_network: 添加新网络
 add_peer_url: 添加节点
 add_initial_node: 添加初始节点
+enable_initial_node: 启用初始节点
+disable_initial_node: 禁用初始节点
+delete_initial_node: 删除初始节点
 add_listener_url: 添加监听地址
 add_mapped_listener: 添加监听映射
 del_cur_network: 删除当前网络
