@@ -1060,6 +1060,7 @@ async fn credential_basic_connectivity(#[case] pin_admin: bool) {
         cred_config.set_peers(vec![PeerConfig {
             uri: "tcp://10.1.1.1:11010".parse().unwrap(),
             peer_public_key: Some(admin_public_key),
+            enabled: true,
         }]);
     }
     let mut cred_inst = Instance::new_with_process_runtime(cred_config, process_runtime.clone());
@@ -1164,6 +1165,7 @@ async fn credential_rejects_incorrect_admin_pin() {
     cred_config.set_peers(vec![PeerConfig {
         uri: "tcp://10.1.1.1:11010".parse().unwrap(),
         peer_public_key: Some(incorrect_admin_public_key),
+        enabled: true,
     }]);
 
     let mut cred_inst = Instance::new_with_process_runtime(cred_config, process_runtime.clone());

@@ -143,6 +143,7 @@ message VpnPortalConfig {
 message NetworkPeerConfig {
   string uri = 1;
   optional string peer_public_key = 2;
+  optional bool enabled = 3;
 }
 
 message PortForwardConfig {

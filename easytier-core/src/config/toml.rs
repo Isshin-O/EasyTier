@@ -281,6 +281,16 @@ impl Default for NetworkIdentity {
 pub struct PeerConfig {
     pub uri: url::Url,
     pub peer_public_key: Option<String>,
+    #[serde(default = "default_peer_enabled", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+}
+
+fn default_peer_enabled() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]

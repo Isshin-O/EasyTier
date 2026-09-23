@@ -209,6 +209,7 @@ fn parse_peer(peer: &manage::NetworkPeerConfig) -> Result<Option<PeerConfig>, an
             .parse()
             .with_context(|| format!("failed to parse peer uri: {}", uri))?,
         peer_public_key: peer.peer_public_key.clone(),
+        enabled: peer.enabled.unwrap_or(true),
     }))
 }
 
@@ -234,6 +235,7 @@ fn parse_peer_urls(peer_urls: &[String]) -> Result<Vec<PeerConfig>, anyhow::Erro
                 .parse()
                 .with_context(|| format!("failed to parse peer uri: {}", peer_url))?,
             peer_public_key: None,
+            enabled: true,
         });
     }
     Ok(peers)
@@ -315,6 +317,7 @@ impl NetworkConfigExt for NetworkConfig {
                             format!("failed to parse public server uri: {}", public_server_url)
                         })?,
                         peer_public_key: None,
+                        enabled: true,
                     }]);
                 } else {
                     cfg.set_peers(peers);
@@ -593,12 +596,17 @@ impl NetworkConfigExt for NetworkConfig {
         let peers = config.get_peers();
         result.networking_method = Some(NetworkingMethod::Manual as i32);
         if !peers.is_empty() {
-            result.peer_urls = peers.iter().map(|p| p.uri.to_string()).collect();
+            result.peer_urls = peers
+                .iter()
+                .filter(|p| p.enabled)
+                .map(|p| p.uri.to_string())
+                .collect();
             result.peers = peers
                 .iter()
                 .map(|p| manage::NetworkPeerConfig {
                     uri: p.uri.to_string(),
                     peer_public_key: p.peer_public_key.clone(),
+                    enabled: Some(p.enabled),
                 })
                 .collect();
         }
@@ -1015,6 +1023,57 @@ mod tests {
         let output = NetworkConfig::new_from_config(&config).unwrap();
         assert_eq!(output.disable_relay_data, Some(false));
         assert_eq!(output.prefer_peer_relay, Some(true));
+    }
+
+    #[test]
+    fn disabled_peers_round_trip_and_are_excluded_from_active_urls() {
+        let input = NetworkConfig {
+            networking_method: Some(NetworkingMethod::Manual as i32),
+            peer_urls: vec!["tcp://active.example:11010".to_owned()],
+            peers: vec![
+                manage::NetworkPeerConfig {
+                    uri: "tcp://active.example:11010".to_owned(),
+                    peer_public_key: None,
+                    enabled: Some(true),
+                },
+                manage::NetworkPeerConfig {
+                    uri: "udp://paused.example:11010".to_owned(),
+                    peer_public_key: None,
+                    enabled: Some(false),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let config = input.gen_config().unwrap();
+        let configured_peers = config.get_peers();
+        assert_eq!(configured_peers.len(), 2);
+        assert!(configured_peers[0].enabled);
+        assert!(!configured_peers[1].enabled);
+
+        let output = NetworkConfig::new_from_config(&config).unwrap();
+        assert_eq!(output.peers, input.peers);
+        assert_eq!(output.peer_urls, vec!["tcp://active.example:11010"]);
+    }
+
+    #[test]
+    fn legacy_peer_without_enabled_field_defaults_to_enabled() {
+        let input = NetworkConfig {
+            networking_method: Some(NetworkingMethod::Manual as i32),
+            peers: vec![manage::NetworkPeerConfig {
+                uri: "tcp://legacy.example:11010".to_owned(),
+                peer_public_key: None,
+                enabled: None,
+            }],
+            ..Default::default()
+        };
+
+        let config = input.gen_config().unwrap();
+        assert!(config.get_peers()[0].enabled);
+        assert_eq!(
+            NetworkConfig::new_from_config(&config).unwrap().peer_urls,
+            vec!["tcp://legacy.example:11010"]
+        );
     }
 
     #[test]
