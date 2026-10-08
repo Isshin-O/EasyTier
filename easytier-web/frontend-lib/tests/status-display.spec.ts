@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { latencyMs, lossRate, udpNatTypeName } from '../src/modules/statusDisplay'
 import { ipv4ToString, ipv6ToString } from '../src/modules/utils'
+import { NatType, normalizeNetworkInstanceRunningInfo } from '../src/types/network'
 
 function peerRoutePair(conns: any[]) {
   return {
@@ -36,6 +37,33 @@ function peerRoutePairWithDefaultConn(conns: any[], defaultConnId: string) {
 }
 
 describe('status display helpers', () => {
+  it('normalizes string and numeric NAT enums while preserving missing data', () => {
+    const info = normalizeNetworkInstanceRunningInfo({
+      my_node_info: { stun_info: {
+        udp_nat_type: 'PortRestricted', tcp_nat_type: 'OpenInternet', last_update_time: '123',
+      } },
+      routes: [
+        { stun_info: { udp_nat_type: 6, tcp_nat_type: 7, last_update_time: '456' } },
+        { hostname: 'missing-stun-info' },
+      ],
+      peer_route_pairs: [
+        { route: { stun_info: {
+          udp_nat_type: 'FutureNatType', tcp_nat_type: 5, last_update_time: '0',
+        } } },
+        { route: { hostname: 'missing-stun-info' } },
+      ],
+    } as any)!
+
+    expect(info.my_node_info.stun_info?.udp_nat_type).toBe(NatType.PortRestricted)
+    expect(info.my_node_info.stun_info?.tcp_nat_type).toBe(NatType.OpenInternet)
+    expect(info.my_node_info.stun_info?.last_update_time).toBe('123')
+    expect(info.routes[0].stun_info?.udp_nat_type).toBe(NatType.Symmetric)
+    expect(info.routes[1]).not.toHaveProperty('stun_info')
+    expect(info.peer_route_pairs[0].route.stun_info?.udp_nat_type).toBe(NatType.Unknown)
+    expect(info.peer_route_pairs[0].route.stun_info?.tcp_nat_type).toBe(NatType.PortRestricted)
+    expect(info.peer_route_pairs[1].route).not.toHaveProperty('stun_info')
+  })
+
   it('does not render missing IP values as zero addresses', () => {
     expect(ipv4ToString(undefined)).toBe('')
     expect(ipv4ToString(null)).toBe('')

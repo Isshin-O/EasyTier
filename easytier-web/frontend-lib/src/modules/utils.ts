@@ -95,6 +95,7 @@ export interface DeviceInfo {
     running_network_count: number;
     report_time: string;
     easytier_version: string;
+    support_peer_enabled?: boolean;
     running_network_instances?: Array<string>;
     machine_id: string;
     location: Location | undefined;
@@ -113,6 +114,7 @@ export function buildDeviceInfo(device: any): DeviceInfo {
         running_network_count: runningInstances.length,
         report_time: device.info?.report_time,
         easytier_version: device.info?.easytier_version,
+        support_peer_enabled: device.info?.support_peer_enabled === true,
         machine_id: UuidToStr(device.info?.machine_id),
         location: device.location,
         networks: device.networks ?? [],

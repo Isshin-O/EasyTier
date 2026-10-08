@@ -49,7 +49,8 @@ const newConfigGenerator = () => {
 
 <template>
     <RemoteManagement :api="remoteClient" v-model:instance-id="selectedInstanceId"
-        :new-config-generator="newConfigGenerator" />
+        :new-config-generator="newConfigGenerator"
+        :remote-peer-toggle-supported="deviceInfo?.support_peer_enabled === true" />
 </template>
 
 <style scoped>
