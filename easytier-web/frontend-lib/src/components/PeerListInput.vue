@@ -4,12 +4,15 @@ import { useI18n } from 'vue-i18n'
 import UrlInput from './UrlInput.vue'
 import type { NetworkPeerConfig } from '../types/network'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   protos: { [proto: string]: number }
   addLabel: string
   placeholder?: string
   defaultUrl?: string
-}>()
+  allowToggle?: boolean
+}>(), {
+  allowToggle: true,
+})
 
 const peers = defineModel<NetworkPeerConfig[]>({ required: true })
 const { t } = useI18n()
@@ -45,8 +48,11 @@ function togglePeer(peer: NetworkPeerConfig): void {
             severity="secondary"
             text
             rounded
+            :disabled="props.allowToggle === false"
             :aria-label="t(peer.enabled === false ? 'enable_initial_node' : 'disable_initial_node')"
-            :title="t(peer.enabled === false ? 'enable_initial_node' : 'disable_initial_node')"
+            :title="t(props.allowToggle === false
+              ? 'initial_node_toggle_requires_upgrade'
+              : (peer.enabled === false ? 'enable_initial_node' : 'disable_initial_node'))"
             @click="togglePeer(peer)"
           />
           <Button

@@ -27,6 +27,7 @@ message HeartbeatRequest {
   // Supports explicit manual mode patches and typed empty-manual readback.
   // Older peers silently ignore unknown patch fields; missing means false.
   bool support_manual_routes_patch = 12;
+  optional bool support_peer_enabled = 13;
 }
 
 message HeartbeatResponse {
