@@ -25,6 +25,7 @@ const ButtonStub = defineComponent({
   props: {
     icon: String,
     ariaLabel: String,
+    disabled: Boolean,
   },
   emits: ['click'],
   setup(props, { emit }) {
@@ -32,6 +33,7 @@ const ButtonStub = defineComponent({
       type: 'button',
       'data-icon': props.icon,
       'aria-label': props.ariaLabel,
+      ...(props.disabled ? { disabled: true } : {}),
       onClick: () => emit('click'),
     })
   },
@@ -87,5 +89,29 @@ describe('PeerListInput', () => {
     await wrapper.find('[data-stub="add-peer"]').trigger('click')
     expect(peers.value).toHaveLength(2)
     expect(peers.value[1]).toEqual({ uri: 'tcp://:11010', enabled: true })
+  })
+
+  it('disables the toggle for unsupported remote cores', () => {
+    const peers = ref([{ uri: 'tcp://active:11010', enabled: true }])
+    const Host = defineComponent({
+      setup() {
+        return () => h(PeerListInput, {
+          modelValue: peers.value,
+          protos: { tcp: 11010 },
+          addLabel: 'Add',
+          allowToggle: false,
+        })
+      },
+    })
+    const wrapper = mount(Host, {
+      global: {
+        stubs: {
+          Button: ButtonStub,
+          UrlInput: UrlInputStub,
+        },
+      },
+    })
+
+    expect(wrapper.find('button[data-icon="pi pi-eye"]').attributes('disabled')).toBeDefined()
   })
 })

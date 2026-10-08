@@ -21,7 +21,7 @@ import PeerListInput from './PeerListInput.vue'
 import { createVpnPortalConfig } from '../modules/vpnPortal'
 import type { VpnPortalClientConfig } from '../types/network'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   actionLabel?: string
   configInvalid?: boolean
   hostname?: string
@@ -31,7 +31,10 @@ const props = defineProps<{
   hideSecureMode?: boolean
   /// Central members save their clients through the configuration owner.
   editVpnPortalClients?: boolean
-}>()
+  allowPeerToggle?: boolean
+}>(), {
+  allowPeerToggle: true,
+})
 
 defineEmits(['runNetwork'])
 
@@ -367,7 +370,7 @@ function removeVpnPortalClient(index: number) {
                   <div class="items-center flex flex-col p-fluid gap-y-2">
                     <PeerListInput id="initial_nodes" v-model="curNetwork.peers" :protos="protos"
                       defaultUrl="tcp://:11010" :add-label="t('add_initial_node')"
-                      :placeholder="t('initial_node_placeholder')" />
+                      :placeholder="t('initial_node_placeholder')" :allow-toggle="props.allowPeerToggle" />
                   </div>
                 </div>
               </div>
