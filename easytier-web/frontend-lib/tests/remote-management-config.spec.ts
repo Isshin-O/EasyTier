@@ -1,6 +1,6 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
-import { nextTick } from 'vue'
+import { defineComponent, h, nextTick } from 'vue'
 import RemoteManagement from '../src/components/RemoteManagement.vue'
 import {
   DEFAULT_NETWORK_CONFIG,
@@ -121,6 +121,15 @@ vi.mock('primevue', async () => {
   }
 })
 
+const ConfigStub = defineComponent({
+  props: {
+    allowPeerToggle: Boolean,
+  },
+  setup(props) {
+    return () => h('div', { 'data-peer-toggle': String(props.allowPeerToggle) })
+  },
+})
+
 const INSTANCE_ID = '00000000-0000-0000-0000-000000000001'
 const INSTANCE_UUID = {
   part1: 0,
@@ -161,7 +170,55 @@ async function settleRemoteManagement() {
   }
 }
 
+function makeRemoteApi() {
+  return {
+    delete_network: vi.fn(),
+    generate_config: vi.fn(),
+    get_network_config: vi.fn(async () => makeFlagConfig()),
+    get_network_info: vi.fn(),
+    get_vpn_portal_info: vi.fn(),
+    get_network_metas: vi.fn(async () => ({
+      metas: {
+        [INSTANCE_ID]: { config_permission: 0xffffffff },
+      },
+    })),
+    list_network_instance_ids: vi.fn(async () => ({
+      disabled_inst_ids: [INSTANCE_UUID],
+      running_inst_ids: [],
+    })),
+    parse_config: vi.fn(),
+    run_network: vi.fn(),
+    save_config: vi.fn(),
+    update_network_instance_state: vi.fn(),
+    validate_config: vi.fn(),
+  } as any
+}
+
 describe('RemoteManagement config save', () => {
+  it('keeps peer toggles enabled when remote capability is unknown', async () => {
+    const api = makeRemoteApi()
+    const wrapper = mount(RemoteManagement, {
+      props: {
+        api,
+        instanceId: INSTANCE_ID,
+      },
+      global: {
+        stubs: {
+          Config: ConfigStub,
+          ConfigEditDialog: true,
+          Status: true,
+        },
+      },
+    })
+
+    try {
+      await settleRemoteManagement()
+      expect(wrapper.find('[data-peer-toggle]').attributes('data-peer-toggle')).toBe('true')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it('saves the current network config without dropping boolean fields', async () => {
     const config = makeFlagConfig()
     const expectedFlags = snapshotBooleanConfigFields(config)
@@ -195,10 +252,11 @@ describe('RemoteManagement config save', () => {
       props: {
         api,
         instanceId: INSTANCE_ID,
+        remotePeerToggleSupported: false,
       },
       global: {
         stubs: {
-          Config: true,
+          Config: ConfigStub,
           ConfigEditDialog: true,
           Status: true,
         },
@@ -211,6 +269,7 @@ describe('RemoteManagement config save', () => {
       const saveButton = wrapper.find('button[data-label="web.device_management.save_config"]')
       expect(saveButton.exists()).toBe(true)
       expect(saveButton.attributes('disabled')).toBeUndefined()
+      expect(wrapper.find('[data-peer-toggle]').attributes('data-peer-toggle')).toBe('false')
 
       await saveButton.trigger('click')
       await flushPromises()

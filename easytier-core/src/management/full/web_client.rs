@@ -437,6 +437,7 @@ fn build_heartbeat_request(
         support_heartbeat_policy: true,
         support_manual_routes_patch: true,
         support_dns_config_patch: Some(true),
+        support_peer_enabled: Some(true),
     }
 }
 

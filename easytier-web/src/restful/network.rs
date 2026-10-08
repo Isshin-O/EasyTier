@@ -533,6 +533,7 @@ impl NetworkApi {
                     support_heartbeat_policy: false,
                     support_manual_routes_patch: false,
                     support_dns_config_patch: None,
+                    support_peer_enabled: None,
                 }),
             };
             machines.push(ListMachineItem {

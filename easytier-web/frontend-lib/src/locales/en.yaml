@@ -83,6 +83,7 @@ add_initial_node: Add Initial Node
 enable_initial_node: Enable Initial Node
 disable_initial_node: Disable Initial Node
 delete_initial_node: Delete Initial Node
+initial_node_toggle_requires_upgrade: The remote device requires EasyTier 2.7.0 or newer
 add_listener_url: Add Listener
 add_mapped_listener: Add Mapped Listener
 del_cur_network: Delete Current Network
