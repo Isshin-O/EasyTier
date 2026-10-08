@@ -9,11 +9,14 @@ import { type MenuItem } from 'primevue/menuitem';
 
 const { t } = useI18n()
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
     api: Api.RemoteClient;
     newConfigGenerator?: () => NetworkTypes.NetworkConfig;
     pauseAutoRefresh?: boolean;
-}>();
+    remotePeerToggleSupported?: boolean;
+}>(), {
+    remotePeerToggleSupported: undefined,
+});
 
 const instanceId = defineModel('instanceId', {
     type: String as () => string | undefined,
@@ -31,6 +34,13 @@ const curNetworkInfo = ref<NetworkTypes.NetworkInstance | null>(null);
 const showConfigEditDialog = ref(false);
 const isEditingNetwork = ref(false); // Flag to indicate if we're in network editing mode
 const currentNetworkConfig = ref<NetworkTypes.NetworkConfig | undefined>(undefined);
+
+const peerToggleSupported = computed(() => {
+    if (props.remotePeerToggleSupported === undefined) {
+        return true;
+    }
+    return props.remotePeerToggleSupported;
+});
 
 const listInstanceIdResponse = ref<Api.ListNetworkInstanceIdResponse | undefined>(undefined);
 
@@ -577,6 +587,7 @@ onUnmounted(() => {
                 <Divider />
 
                 <Config :cur-network="currentNetworkConfig" :config-invalid="!currentNetworkConfig"
+                    :allow-peer-toggle="peerToggleSupported"
                     @run-network="saveAndRunNewNetwork"></Config>
             </div>
 

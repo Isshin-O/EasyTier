@@ -1,4 +1,4 @@
-import { type Api, type NetworkTypes } from "easytier-frontend-lib";
+import { Api, NetworkTypes } from "easytier-frontend-lib";
 import * as backend from "~/composables/backend";
 
 export class GUIRemoteClient implements Api.RemoteClient {
@@ -9,7 +9,8 @@ export class GUIRemoteClient implements Api.RemoteClient {
         await backend.runNetworkInstance(config, save);
     }
     async get_network_info(inst_id: string): Promise<NetworkTypes.NetworkInstanceRunningInfo | undefined> {
-        return backend.collectNetworkInfo(inst_id).then(infos => infos.info?.map?.[inst_id]);
+        return backend.collectNetworkInfo(inst_id).then(infos =>
+            NetworkTypes.normalizeNetworkInstanceRunningInfo(infos.info?.map?.[inst_id]));
     }
     async get_vpn_portal_info(inst_id: string): Promise<NetworkTypes.VpnPortalInfo | undefined> {
         return backend.getVpnPortalInfo(inst_id);

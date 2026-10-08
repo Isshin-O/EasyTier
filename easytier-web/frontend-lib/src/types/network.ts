@@ -31,6 +31,7 @@ import {
   CompressionAlgoPb,
   Flags as FlagsPb,
   NatType,
+  StunInfo as StunInfoPb,
   type PeerFeatureFlag,
   type Ipv6Inet,
   type SecureModeConfig,
@@ -568,6 +569,49 @@ export interface PeerConnInfo {
 export interface PeerRoutePair {
   route: Route
   peer?: PeerInfo
+}
+
+function normalizeStunInfo<T extends { stun_info?: StunInfo | null }>(value: T): T {
+  const stunInfo = value.stun_info
+  if (!stunInfo)
+    return value
+
+  const parsed = StunInfoPb.fromJson(stunInfo as any, { ignoreUnknownFields: true })
+  const natType = (value: NatType | false): NatType =>
+    typeof value === 'number' && Number.isInteger(value) ? value : NatType.Unknown
+  return {
+    ...value,
+    stun_info: {
+      ...stunInfo,
+      udp_nat_type: natType(parsed.udp_nat_type),
+      tcp_nat_type: natType(parsed.tcp_nat_type),
+    },
+  }
+}
+
+export function normalizeNetworkInstanceRunningInfo(
+  info: NetworkInstanceRunningInfo | undefined,
+): NetworkInstanceRunningInfo | undefined {
+  if (!info)
+    return info
+
+  const myNodeInfo = info.my_node_info?.stun_info
+    ? normalizeStunInfo(info.my_node_info)
+    : undefined
+
+  return {
+    ...info,
+    ...(myNodeInfo ? { my_node_info: myNodeInfo } : {}),
+    ...(info.routes ? { routes: info.routes.map(normalizeStunInfo) } : {}),
+    ...(info.peer_route_pairs
+      ? {
+          peer_route_pairs: info.peer_route_pairs.map(pair => ({
+            ...pair,
+            route: pair.route ? normalizeStunInfo(pair.route) : pair.route,
+          })),
+        }
+      : {}),
+  }
 }
 
 export interface UrlPb {
