@@ -6,6 +6,7 @@ import { ScalarType } from '@protobuf-ts/runtime'
 import type { FlagMeta } from '../src/generated/proto/annotations'
 import { NetworkConfig as NetworkConfigPb } from '../src/generated/proto/api_manage'
 import { Flags as FlagsPb } from '../src/generated/proto/common'
+import UrlListInput from '../src/components/UrlListInput.vue'
 import {
   DEFAULT_NETWORK_CONFIG,
   normalizeNetworkConfig,
@@ -379,7 +380,7 @@ function makeConfig(): NetworkConfig {
   }
 }
 
-function mountConfig(config: NetworkConfig = makeConfig()) {
+function mountConfig(config: NetworkConfig = makeConfig(), stubs: Record<string, unknown> = {}) {
   const curNetwork = reactive(config) as NetworkConfig
   const wrapper = mount(Config, {
     props: {
@@ -408,6 +409,7 @@ function mountConfig(config: NetworkConfig = makeConfig()) {
         SelectButton: SelectButtonStub,
         ToggleButton: ToggleButtonStub,
         UrlListInput: UrlListInputStub,
+        ...stubs,
       },
     },
   })
@@ -709,5 +711,13 @@ describe('Config.vue network config projection', () => {
       { uri: 'udp://paused:11010', enabled: false },
     ])
     expect(backend.peer_urls).toEqual(['tcp://active:11010'])
+  })
+
+  // Name-based stubs also satisfy runtime component lookup, so use the real
+  // component here to catch a missing import.
+  it('renders the real listener and mapped listener inputs', () => {
+    const { wrapper } = mountConfig(makeConfig(), { UrlListInput: false, UrlInput: true })
+
+    expect(wrapper.findAllComponents(UrlListInput)).toHaveLength(2)
   })
 })
