@@ -83,7 +83,7 @@ add_initial_node: 添加初始节点
 enable_initial_node: 启用初始节点
 disable_initial_node: 禁用初始节点
 delete_initial_node: 删除初始节点
-initial_node_toggle_requires_upgrade: 远端设备需要 EasyTier 2.7.0 或更高版本
+initial_node_toggle_requires_upgrade: 远端设备的 EasyTier 版本不支持禁用初始节点，请升级
 add_listener_url: 添加监听地址
 add_mapped_listener: 添加监听映射
 del_cur_network: 删除当前网络
