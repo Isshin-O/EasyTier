@@ -79,17 +79,51 @@ fn ensure_linux_ipv6_forwarding_at_paths(
     Ok(changed)
 }
 
-fn ensure_linux_ipv6_forwarding() -> Result<bool, Error> {
-    let all_path = Path::new("/proc/sys/net/ipv6/conf/all/forwarding");
-    let default_path = Path::new("/proc/sys/net/ipv6/conf/default/forwarding");
+/// Turning forwarding on makes the kernel purge RA-learned default routes and
+/// ignore later RAs wherever accept_ra=1 (kernel SLAAC on a single /64 WAN).
+/// accept_ra=2 keeps RA processing as it was before the switch.
+fn keep_linux_accept_ra_before_forwarding(
+    conf: &Path,
+    all_path: &Path,
+    default_path: &Path,
+) -> Result<(), Error> {
+    if read_linux_proc_bool(all_path)? && read_linux_proc_bool(default_path)? {
+        return Ok(());
+    }
 
-    ensure_linux_ipv6_forwarding_at_paths(all_path, default_path).map_err(|err| {
-        anyhow::anyhow!(
-            "public IPv6 provider requires Linux IPv6 forwarding; failed to enable net.ipv6.conf.all.forwarding=1 and net.ipv6.conf.default.forwarding=1 automatically: {}. run with sufficient privileges or set them manually",
-            err
-        )
-        .into()
-    })
+    for entry in
+        std::fs::read_dir(conf).with_context(|| format!("failed to list {}", conf.display()))?
+    {
+        let path = entry
+            .with_context(|| format!("failed to list {}", conf.display()))?
+            .path()
+            .join("accept_ra");
+        if std::fs::read_to_string(&path).is_ok_and(|value| value.trim() == "1") {
+            std::fs::write(&path, "2\n")
+                .with_context(|| format!("failed to write {}", path.display()))?;
+            tracing::info!(
+                path = %path.display(),
+                "set accept_ra=2 before enabling IPv6 forwarding"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn ensure_linux_ipv6_forwarding() -> Result<bool, Error> {
+    let conf = Path::new("/proc/sys/net/ipv6/conf");
+    let all_path = conf.join("all/forwarding");
+    let default_path = conf.join("default/forwarding");
+
+    keep_linux_accept_ra_before_forwarding(conf, &all_path, &default_path)
+        .and_then(|()| ensure_linux_ipv6_forwarding_at_paths(&all_path, &default_path))
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "public IPv6 provider requires Linux IPv6 forwarding; failed to enable net.ipv6.conf.all.forwarding=1 and net.ipv6.conf.default.forwarding=1 automatically: {}. run with sufficient privileges or set them manually",
+                err
+            )
+            .into()
+        })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -510,12 +544,17 @@ fn clear_owned_ndp_proxy_entries(
 }
 
 fn ensure_linux_ndp_proxy_enabled(wan_iface: &str) -> Result<(), Error> {
-    let path = Path::new("/proc/sys/net/ipv6/conf")
-        .join(wan_iface)
-        .join("proxy_ndp");
-    if !read_linux_proc_bool(&path)? {
-        write_linux_proc_bool(&path, true)?;
-        tracing::info!(wan_iface = %wan_iface, "enabled Linux NDP proxy");
+    let conf = Path::new("/proc/sys/net/ipv6/conf");
+    // The per-interface flag only covers multicast NS. Unicast NUD probes for a
+    // proxied address go through ip6_forward(), which checks conf/all/proxy_ndp.
+    for path in [
+        conf.join(wan_iface).join("proxy_ndp"),
+        conf.join("all/proxy_ndp"),
+    ] {
+        if !read_linux_proc_bool(&path)? {
+            write_linux_proc_bool(&path, true)?;
+            tracing::info!(path = %path.display(), "enabled Linux NDP proxy");
+        }
     }
     Ok(())
 }
@@ -959,6 +998,33 @@ mod tests {
         assert!(!changed);
         assert_eq!(fs::read_to_string(&all_path).unwrap(), "1\n");
         assert_eq!(fs::read_to_string(&default_path).unwrap(), "1\n");
+    }
+
+    #[test]
+    fn test_keep_linux_accept_ra_before_forwarding_promotes_kernel_ra_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let conf = dir.path();
+        for (iface, accept_ra) in [("all", "1"), ("default", "1"), ("eth0", "1"), ("ppp0", "0")] {
+            fs::create_dir(conf.join(iface)).unwrap();
+            fs::write(conf.join(iface).join("accept_ra"), accept_ra).unwrap();
+            fs::write(conf.join(iface).join("forwarding"), "0\n").unwrap();
+        }
+        let all_path = conf.join("all/forwarding");
+        let default_path = conf.join("default/forwarding");
+        let accept_ra =
+            |iface: &str| fs::read_to_string(conf.join(iface).join("accept_ra")).unwrap();
+
+        super::keep_linux_accept_ra_before_forwarding(conf, &all_path, &default_path).unwrap();
+        assert_eq!(accept_ra("eth0"), "2\n");
+        assert_eq!(accept_ra("default"), "2\n");
+        assert_eq!(accept_ra("ppp0"), "0");
+
+        // Forwarding already on: the operator chose RA behaviour, leave it alone.
+        fs::write(conf.join("eth0/accept_ra"), "1").unwrap();
+        fs::write(&all_path, "1\n").unwrap();
+        fs::write(&default_path, "1\n").unwrap();
+        super::keep_linux_accept_ra_before_forwarding(conf, &all_path, &default_path).unwrap();
+        assert_eq!(accept_ra("eth0"), "1");
     }
 
     #[serial_test::serial]
