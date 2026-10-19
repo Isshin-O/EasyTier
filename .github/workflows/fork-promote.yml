@@ -1,0 +1,56 @@
+# Fork only, run by hand after testing the `nightly` prerelease on a device.
+# Copies its assets to a release named <version>-<sha8> marked Latest and
+# points ghcr.io/<owner>/easytier:stable at the matching image. Devices only
+# follow Latest and :stable, so this is the one switch that ships an update.
+name: Fork Promote
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: fork-promote
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  promote:
+    if: github.repository != 'EasyTier/EasyTier'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Promote nightly to Latest and :stable
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/easytier"
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/nightly" --jq .object.sha)
+          gh release download nightly --repo "$GITHUB_REPOSITORY" --dir assets
+          cd assets
+          version=$(ls easytier-linux-x86_64-*.zip | sed 's/^easytier-linux-x86_64-//; s/\.zip$//')
+          tag="${version}-${sha:0:8}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $tag already exists." >&2
+            exit 1
+          fi
+          # Fork Docker must have built this exact commit before anything ships.
+          docker buildx imagetools inspect "$image:$tag" >/dev/null
+
+          # luci-app-easytier downloads easytier-linux-<arch>-<tag>.zip.
+          for f in *; do
+            new="${f/-${version}./-${tag}.}"
+            if [ "$new" != "$f" ]; then mv "$f" "$new"; fi
+          done
+          rm -f SHA256SUMS
+          sha256sum * > SHA256SUMS
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$sha" \
+            --title "$tag" --notes "Promoted from nightly at ${sha}." --latest *
+          docker buildx imagetools create -t "$image:stable" "$image:$tag"
