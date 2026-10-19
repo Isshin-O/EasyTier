@@ -1,0 +1,63 @@
+# Fork only: rebase our commits onto upstream main every week, then run the
+# upstream Nightly workflow, which builds everything and updates the `nightly`
+# prerelease. Fork Docker runs after Nightly. Nothing reaches devices until
+# Fork Promote is run by hand.
+#
+# Needs secret SYNC_TOKEN: a fine-grained PAT for this repository with
+# Contents: write, Workflows: write and Actions: write. GITHUB_TOKEN cannot
+# push commits that touch .github/workflows, and runs it dispatches do not
+# trigger workflow_run, so Fork Docker would never start.
+name: Fork Sync
+
+on:
+  schedule:
+    # Monday 03:00 Asia/Shanghai.
+    - cron: '0 19 * * 0'
+  workflow_dispatch:
+
+concurrency:
+  group: fork-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    if: github.repository != 'EasyTier/EasyTier'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN }}
+
+      - name: Rebase onto upstream main
+        id: rebase
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream https://github.com/EasyTier/EasyTier.git
+          git fetch --no-tags upstream main
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Already based on upstream $(git rev-parse --short upstream/main)."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A conflict fails this step; GitHub then emails the failure.
+          # Resolve it locally and force-push main.
+          git rebase upstream/main
+          git push --force-with-lease=main origin HEAD:main
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Start Nightly build
+        if: steps.rebase.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          # The rebase rewrote history, so nightly...main is "diverged" and
+          # nightly-release.js would skip the new build as older. Drop the old
+          # nightly first; Promoted releases keep their own tags.
+          gh release delete nightly --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
+          gh workflow run nightly.yml --repo "$GITHUB_REPOSITORY" --ref main
