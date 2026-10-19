@@ -91,9 +91,6 @@ jobs:
           - TARGET: x86_64-unknown-linux-musl
             OS: ubuntu-24.04
             FEATURES: jemalloc
-          - TARGET: aarch64-apple-darwin
-            OS: macos-latest
-            FEATURES: jemalloc
           - TARGET: x86_64-pc-windows-msvc
             OS: windows-latest
             FEATURES: mimalloc
@@ -186,12 +183,6 @@ jobs:
             ARTIFACT_NAME: freebsd-13.2-x86_64
             BSD_VERSION: 13.2
 
-          - TARGET: x86_64-apple-darwin
-            OS: macos-latest
-            ARTIFACT_NAME: macos-x86_64
-          - TARGET: aarch64-apple-darwin
-            OS: macos-latest
-            ARTIFACT_NAME: macos-aarch64
 
           - TARGET: x86_64-pc-windows-msvc
             OS: windows-latest
