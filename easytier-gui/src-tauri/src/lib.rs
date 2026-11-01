@@ -890,6 +890,12 @@ mod manager {
             Ok(())
         }
 
+        fn mark_stopped(&self, ids: &[Uuid]) {
+            for id in ids {
+                self.enabled_networks.remove(id);
+            }
+        }
+
         fn save_config(
             &self,
             app: &AppHandle,
@@ -1128,9 +1134,11 @@ mod manager {
             app: &AppHandle,
             ids: &[uuid::Uuid],
         ) -> Result<(), String> {
+            // The console sends the same removal for "disable" and "delete", so keep
+            // the config as a stopped network instead of dropping it from the list.
+            self.storage.mark_stopped(ids);
             self.storage
-                .delete_network_configs(app.clone(), ids)
-                .await
+                .save_enabled_networks(app)
                 .map_err(|e| e.to_string())?;
             self.notify_vpn_stop_if_no_tun(app)?;
             Ok(())
@@ -1304,6 +1312,26 @@ mod manager {
                 PersistedConfigSource::Legacy.merge_persisted(PersistedConfigSource::Web),
                 PersistedConfigSource::Web
             );
+        }
+
+        #[test]
+        fn remote_stop_keeps_config_but_clears_enabled_state() {
+            let storage = super::GUIStorage::new();
+            let id = uuid::Uuid::new_v4();
+            storage.network_configs.insert(
+                id,
+                super::GUIConfig::new(
+                    id.to_string(),
+                    NetworkConfig::default(),
+                    PersistedConfigSource::User,
+                ),
+            );
+            storage.enabled_networks.insert(id);
+
+            storage.mark_stopped(&[id]);
+
+            assert!(storage.network_configs.contains_key(&id));
+            assert!(!storage.enabled_networks.contains(&id));
         }
     }
 }
