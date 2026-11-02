@@ -80,6 +80,16 @@ impl IpToIfNameCache {
     }
 }
 
+/// Normalizes an address into the form the userspace stack sees on the wire.
+///
+/// Packets parsed from the capture device carry plain `(ip, port)` pairs, so
+/// IPv6 flowinfo/scope ids must be dropped and IPv4-mapped IPv6 addresses
+/// (reported by dual-stack sockets) must be unwrapped, otherwise tuple lookups
+/// and capture filters never match.
+fn normalize_stack_addr(addr: SocketAddr) -> SocketAddr {
+    SocketAddr::new(addr.ip().to_canonical(), addr.port())
+}
+
 fn faketcp_transport_label(driver_type: &str) -> String {
     format!("faketcp_{}", driver_type)
 }
@@ -101,8 +111,10 @@ async fn create_tun_off_runtime(
 pub(crate) struct FakeTcpSocketListener {
     addr: url::Url,
     os_listener: Option<tokio::net::TcpListener>,
-    // interface_name -> fake tcp stack
-    stack_map: DashMap<String, Arc<stack::Stack>>,
+    // (interface_name, local ip) -> fake tcp stack. The capture filter of a
+    // stack is bound to one local address (and address family), so interfaces
+    // with several addresses, which is the norm for IPv6, need one stack each.
+    stack_map: DashMap<(String, IpAddr), Arc<stack::Stack>>,
     // a cache from ip addr to interface name
     ip_to_ifname: IpToIfNameCache,
 }
@@ -135,6 +147,8 @@ impl FakeTcpSocketListener {
                         tracing::warn!("accept fail with local_addr error");
                         continue;
                     };
+                    let local_addr = normalize_stack_addr(local_addr);
+                    let remote_addr = normalize_stack_addr(remote_addr);
                     let Some((interface_name, mac)) =
                         self.ip_to_ifname.get_ifname(&local_addr.ip())
                     else {
@@ -172,8 +186,9 @@ impl FakeTcpSocketListener {
         let local_socket_addr = accept_result.local_addr;
 
         let interface_name = &accept_result.interface_name;
+        let stack_key = (interface_name.clone(), local_socket_addr.ip());
 
-        if let Some(entry) = self.stack_map.get(interface_name) {
+        if let Some(entry) = self.stack_map.get(&stack_key) {
             let stack = entry.clone();
             drop(entry);
 
@@ -183,9 +198,10 @@ impl FakeTcpSocketListener {
 
             tracing::warn!(
                 interface_name,
+                ?local_socket_addr,
                 "fake_tcp stack reader_task finished, recreating stack"
             );
-            self.stack_map.remove(interface_name);
+            self.stack_map.remove(&stack_key);
         }
 
         let tun = create_tun_off_runtime(
@@ -201,8 +217,7 @@ impl FakeTcpSocketListener {
             interface_name
         );
         let stack = Arc::new(stack::Stack::new(tun, accept_result.mac));
-        self.stack_map
-            .insert(interface_name.to_string(), stack.clone());
+        self.stack_map.insert(stack_key, stack.clone());
 
         Ok(stack)
     }
@@ -360,7 +375,8 @@ impl FakeTcpSocketListener {
                     interface_name = res.interface_name,
                     "fake_tcp stack closed while accepting connection, dropping accepted socket"
                 );
-                self.stack_map.remove(&res.interface_name);
+                self.stack_map
+                    .remove(&(res.interface_name.clone(), res.local_addr.ip()));
                 continue;
             };
             break (res, stack, socket);
@@ -383,7 +399,15 @@ impl FakeTcpSocketListener {
     async fn listen_socket(&mut self) -> Result<(), TunnelError> {
         let port = self.addr.port().unwrap_or(0);
         let bind_addr = SocketAddr::from_url(self.addr.clone(), IpVersion::Both).await?;
-        let os_listener = tokio::net::TcpListener::bind(bind_addr).await?;
+        // An IPv6 listener is IPv6-only so that `faketcp://[::]:port` can run
+        // next to `faketcp://0.0.0.0:port` (the planner's IPv6 shadow), like
+        // the other TCP-based listeners.
+        let os_listener = crate::tunnel::common::bind::<tokio::net::TcpListener>()
+            .addr(bind_addr)
+            .dev(crate::tunnel::common::BindDev::Disabled)
+            .only_v6(bind_addr.is_ipv6())
+            .call()
+            .await?;
         tracing::info!(port, "FakeTcpSocketListener listening");
         self.os_listener = Some(os_listener);
         Ok(())
@@ -432,18 +456,33 @@ async fn connect_socket_with_cache(
     ip_to_if_name: &IpToIfNameCache,
     net_ns: NetNS,
 ) -> Result<FakeTcpSocket, TunnelError> {
+    let stack_remote_addr = normalize_stack_addr(remote_addr);
+    // Keep the caller's address (it may carry an IPv6 scope id) for the
+    // kernel connect unless it was an IPv4-mapped address.
+    let connect_addr = if stack_remote_addr.is_ipv6() {
+        remote_addr
+    } else {
+        stack_remote_addr
+    };
     let (local_addr, interface_name, mac, os_socket) = net_ns.run(|| {
-        let local_ip = get_local_ip_for_destination(remote_addr.ip())
+        let local_ip = get_local_ip_for_destination(stack_remote_addr.ip())
             .ok_or(TunnelError::InternalError("Failed to get local ip".into()))?;
 
-        let os_socket = tokio::net::TcpSocket::new_v4()?;
+        let os_socket = if stack_remote_addr.is_ipv4() {
+            tokio::net::TcpSocket::new_v4()?
+        } else {
+            tokio::net::TcpSocket::new_v6()?
+        };
         // SO_MARK applies only to the kernel-visible "decoy" socket below.
         // The actual FakeTCP payload travels via crafted segments written
         // straight to the TUN device, which the kernel doesn't tag with
         // SO_MARK. Operators relying on fwmark for FakeTCP must mark the
         // TUN device's traffic with a separate nftables/iptables rule.
         crate::tunnel::common::apply_socket_mark(&socket2::SockRef::from(&os_socket), socket_mark)?;
-        os_socket.bind("0.0.0.0:0".parse().unwrap())?;
+        // Bind the decoy socket to the exact source address the capture
+        // filter and crafted segments use, instead of letting the kernel pick
+        // one again (IPv6 hosts usually have several candidates).
+        os_socket.bind(SocketAddr::new(local_ip, 0))?;
         let local_addr = SocketAddr::new(local_ip, os_socket.local_addr()?.port());
 
         let (interface_name, mac) =
@@ -455,17 +494,18 @@ async fn connect_socket_with_cache(
         Ok::<_, TunnelError>((local_addr, interface_name, mac, os_socket))
     })?;
 
-    let tun = create_tun_off_runtime(interface_name, Some(remote_addr), local_addr, net_ns).await?;
+    let tun =
+        create_tun_off_runtime(interface_name, Some(stack_remote_addr), local_addr, net_ns).await?;
     let stack = stack::Stack::new(tun, mac);
     let transport_label = faketcp_transport_label(stack.driver_type());
 
     let socket = stack
-        .try_alloc_established_socket(local_addr, remote_addr, stack::State::SynSent)
+        .try_alloc_established_socket(local_addr, stack_remote_addr, stack::State::SynSent)
         .ok_or(TunnelError::InternalError(
             "FakeTCP stack closed while allocating socket".into(),
         ))?;
 
-    let os_stream = os_socket.connect(remote_addr).await?;
+    let os_stream = os_socket.connect(connect_addr).await?;
 
     tracing::info!(?remote_addr, "FakeTCP socket connecting");
 
@@ -539,5 +579,75 @@ mod tests {
         })
         .await
         .expect("FakeTCP socket ping-pong timed out");
+    }
+
+    #[test]
+    fn normalize_stack_addr_strips_ipv6_scope_and_mapped_v4() {
+        let scoped = SocketAddr::V6(std::net::SocketAddrV6::new(
+            "2001:db8::1".parse().unwrap(),
+            11013,
+            7,
+            3,
+        ));
+        assert_eq!(
+            normalize_stack_addr(scoped),
+            "[2001:db8::1]:11013".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(
+            normalize_stack_addr("[::ffff:192.0.2.1]:11013".parse().unwrap()),
+            "192.0.2.1:11013".parse::<SocketAddr>().unwrap()
+        );
+        let v4: SocketAddr = "192.0.2.1:11013".parse().unwrap();
+        assert_eq!(normalize_stack_addr(v4), v4);
+    }
+
+    #[tokio::test]
+    async fn faketcp_socket_pingpong_ipv6() {
+        #[cfg(target_family = "unix")]
+        {
+            if unsafe { nix::libc::geteuid() } != 0 {
+                return;
+            }
+        }
+        if std::net::TcpListener::bind("[::1]:0").is_err() {
+            // Host without IPv6 loopback.
+            return;
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut listener = FakeTcpSocketListener::new("faketcp://[::]:31012".parse().unwrap());
+            listener.listen().await.unwrap();
+            // The IPv6 listener must be IPv6-only so an IPv4 listener can
+            // share the port, as the IPv6 shadow listener requires.
+            let mut v4_listener =
+                FakeTcpSocketListener::new("faketcp://0.0.0.0:31012".parse().unwrap());
+            v4_listener.listen().await.unwrap();
+
+            let (server_ready_tx, server_ready_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let mut socket = listener.accept().await.unwrap();
+                assert!(socket.peer_addr().unwrap().is_ipv6());
+                server_ready_tx.send(()).unwrap();
+                let mut request = [0; 4];
+                socket.read_exact(&mut request).await.unwrap();
+                assert_eq!(&request, b"ping");
+                socket.write_all(b"pong").await.unwrap();
+            });
+
+            let mut socket = connect_socket("[::1]:31012".parse().unwrap(), None, NetNS::new(None))
+                .await
+                .unwrap();
+            assert!(socket.local_addr().unwrap().is_ipv6());
+            server_ready_rx.await.unwrap();
+            socket.write_all(b"ping").await.unwrap();
+            let mut response = [0; 4];
+            socket.read_exact(&mut response).await.unwrap();
+            assert_eq!(&response, b"pong");
+
+            server.await.unwrap();
+            drop(v4_listener);
+        })
+        .await
+        .expect("FakeTCP IPv6 socket ping-pong timed out");
     }
 }
