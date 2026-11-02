@@ -160,7 +160,6 @@ where
     if external_factory.is_some_and(|factory| factory.supports_scheme("unix")) {
         schemes = schemes.support("unix", ListenerKind::External);
     }
-    schemes = schemes.disable_ipv6_shadow("faketcp");
 
     let plan = plan_listeners(config.request(self_id), &schemes);
     let mut transports = Vec::new();
@@ -378,7 +377,6 @@ mod tests {
             .support("quic", ListenerKind::External)
             .support("faketcp", ListenerKind::External)
             .disable_ipv6_shadow("quic")
-            .disable_ipv6_shadow("faketcp")
     }
 
     #[test]
@@ -439,15 +437,37 @@ mod tests {
 
     #[test]
     fn listener_plan_skips_ipv6_shadow_for_excluded_schemes() {
-        for url in ["quic://0.0.0.0:11012", "faketcp://0.0.0.0:11013"] {
-            let plan = plan_listeners(
-                ListenerPlanRequest::new(uuid::Uuid::new_v4(), vec![url.parse().unwrap()], true),
-                &registry(),
-            );
+        let plan = plan_listeners(
+            ListenerPlanRequest::new(
+                uuid::Uuid::new_v4(),
+                vec!["quic://0.0.0.0:11012".parse().unwrap()],
+                true,
+            ),
+            &registry(),
+        );
 
-            assert_eq!(plan.failures, Vec::new());
-            assert_eq!(plan.listeners.len(), 2);
-        }
+        assert_eq!(plan.failures, Vec::new());
+        assert_eq!(plan.listeners.len(), 2);
+    }
+
+    #[test]
+    fn listener_plan_adds_ipv6_shadow_for_faketcp() {
+        let plan = plan_listeners(
+            ListenerPlanRequest::new(
+                uuid::Uuid::new_v4(),
+                vec!["faketcp://0.0.0.0:11013".parse().unwrap()],
+                true,
+            ),
+            &registry(),
+        );
+
+        assert_eq!(plan.failures, Vec::new());
+        assert_eq!(plan.listeners.len(), 3);
+        assert_eq!(
+            plan.listeners[2].url,
+            "faketcp://[::]:11013".parse().unwrap()
+        );
+        assert!(!plan.listeners[2].must_succeed);
     }
 
     #[test]
