@@ -229,7 +229,14 @@ const saveAndRunNewNetwork = async (config?: NetworkTypes.NetworkConfig) => {
 
     try {
         if (networkIsDisabled.value) {
-            await props.api.save_config(cfg);
+            try {
+                await props.api.save_config(cfg);
+            } catch (e: any) {
+                // A paused central network member keeps its compiled config; just resume it.
+                if (e?.response?.data?.code !== 'central_network_ownership_conflict') {
+                    throw e;
+                }
+            }
             await props.api.update_network_instance_state(cfg.instance_id, false);
         } else {
             await props.api.run_network(cfg, currentNetworkControl.remoteSave.value);
