@@ -13,6 +13,7 @@ use easytier::proto::common::Void;
 use easytier::proto::{api::manage::*, web::*};
 use easytier_core::management::remote_client::{
     GetNetworkMetasResponse, ListNetworkInstanceIdsJsonResp, RemoteClientError, RemoteClientManager,
+    Storage as _,
 };
 use sea_orm::DbErr;
 
@@ -574,8 +575,27 @@ impl NetworkApi {
 
         let user_id = Self::get_user_id(&auth_session)?;
         let _mutation = network_service.lock_mutations().await;
-        ensure_direct_mutation_allowed(&network_service, user_id, machine_id, inst_id, None)
-            .await?;
+        let central_owned = network_service
+            .db
+            .central_owned_runtime_configs(user_id, machine_id)
+            .await
+            .map_err(convert_db_error)?
+            .iter()
+            .any(|config| config.instance_id == inst_id);
+        if central_owned {
+            // Pause or resume a central network member: only flip the stored state
+            // and let the runtime reconcile stop or restart the instance, so the
+            // compiled config is never replaced by the device's copy.
+            network_service
+                .db
+                .update_network_config_state((user_id, machine_id), inst_id, payload.disabled)
+                .await
+                .map_err(convert_db_error)?;
+            client_mgr
+                .invalidate_applied_config_revision(user_id, machine_id)
+                .await;
+            return Ok(());
+        }
         client_mgr
             .invalidate_applied_config_revision(user_id, machine_id)
             .await;
