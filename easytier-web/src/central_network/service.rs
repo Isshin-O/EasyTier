@@ -1851,6 +1851,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn paused_member_stays_paused_when_the_network_is_republished() {
+        use easytier_core::management::remote_client::{ListNetworkProps, Storage as _};
+        let (service, user_id, _) = service().await;
+        let device = Uuid::new_v4();
+        register_device(&service, user_id, device).await;
+        let network = service
+            .create_network(user_id, standalone_settings(), None)
+            .await
+            .unwrap();
+        let network_id = Uuid::parse_str(&network.network_id).unwrap();
+        service
+            .add_members(
+                user_id,
+                network_id,
+                AddMembersReq {
+                    device_ids: vec![device.to_string()],
+                    temporary: false,
+                    ttl_seconds: None,
+                },
+            )
+            .await
+            .unwrap();
+        service
+            .db
+            .update_network_config_state((user_id, device), network_id, true)
+            .await
+            .unwrap();
+
+        let mut settings = standalone_settings();
+        settings.display_name = "Renamed".to_owned();
+        settings.network_name = Some("renamed".to_owned());
+        service
+            .update_network(
+                user_id,
+                network_id,
+                UpdateNetworkReq {
+                    settings,
+                    network_secret: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let enabled = service
+            .db
+            .list_network_configs((user_id, device), ListNetworkProps::EnabledOnly)
+            .await
+            .unwrap();
+        assert!(enabled.iter().all(|c| c.network_instance_id != network.network_id));
+        let stored = service
+            .db
+            .get_network_config((user_id, device), &network.network_id)
+            .await
+            .unwrap()
+            .expect("paused member keeps its config");
+        assert!(stored.network_config.contains("renamed"));
+    }
+
+    #[tokio::test]
     async fn subnet_changes_reallocate_automatic_addresses_and_preserve_manual_intent() {
         let (service, user_id, _) = service().await;
         let devices = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
