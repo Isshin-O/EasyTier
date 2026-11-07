@@ -202,8 +202,13 @@ impl Db {
         .bind(user_id).bind(device_id.to_string())
         .fetch_all(&mut *transaction).await.map_err(sqlx_db_error)?;
         let mut merged = BTreeMap::new();
+        let mut paused = HashSet::new();
         for (id, config, disabled) in stored {
-            if !owned.contains(&id) {
+            if owned.contains(&id) {
+                if disabled {
+                    paused.insert(id);
+                }
+            } else {
                 let config: serde_json::Value = serde_json::from_str(&config)
                     .map_err(|error| CentralIntentError::InvalidStoredData(error.to_string()))?;
                 merged.insert(id, (config, disabled));
@@ -258,6 +263,19 @@ impl Db {
                 return Err(CentralIntentError::InvalidStoredData(format!(
                     "central instance {instance_id} conflicts with a user-owned configuration"
                 )));
+            }
+            // A member paused from the device page stays paused across publications.
+            if paused.contains(&config.instance_id) {
+                sqlx::query(
+                    "UPDATE user_running_network_configs SET disabled = 1 \
+                     WHERE user_id = ? AND device_id = ? AND network_instance_id = ?",
+                )
+                .bind(user_id)
+                .bind(device_id.to_string())
+                .bind(&config.instance_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(sqlx_db_error)?;
             }
         }
         super::write_managed_config_revision(&mut transaction, user_id, device_id, &revision)
