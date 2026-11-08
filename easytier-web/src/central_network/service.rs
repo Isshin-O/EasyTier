@@ -1899,7 +1899,11 @@ mod tests {
             .list_network_configs((user_id, device), ListNetworkProps::EnabledOnly)
             .await
             .unwrap();
-        assert!(enabled.iter().all(|c| c.network_instance_id != network.network_id));
+        assert!(
+            enabled
+                .iter()
+                .all(|c| c.network_instance_id != network.network_id)
+        );
         let stored = service
             .db
             .get_network_config((user_id, device), &network.network_id)
