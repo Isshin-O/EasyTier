@@ -12,8 +12,8 @@ use easytier::proto::api::config::VpnPortalClientPatch;
 use easytier::proto::common::Void;
 use easytier::proto::{api::manage::*, web::*};
 use easytier_core::management::remote_client::{
-    GetNetworkMetasResponse, ListNetworkInstanceIdsJsonResp, RemoteClientError, RemoteClientManager,
-    Storage as _,
+    GetNetworkMetasResponse, ListNetworkInstanceIdsJsonResp, RemoteClientError,
+    RemoteClientManager, Storage as _,
 };
 use sea_orm::DbErr;
 
