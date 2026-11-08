@@ -83,7 +83,8 @@ fetch "https://api.github.com/repos/$REPO/releases/latest" "$WORK/latest.json"
 tag=$(sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' "$WORK/latest.json" | head -n 1)
 [ -n "$tag" ] || { echo "取不到 Latest 版本"; exit 1; }
 have=$("$DIR/easytier-core" --version 2>/dev/null | awk '{print $2}')
-if [ "v$have" = "$tag" ]; then echo "已是最新：$tag"; exit 0; fi
+# 新版 --version 末尾带提交日期（2.7.0-<sha8>-YYYYMMDD），tag 没有。
+case "v$have" in "$tag" | "$tag"-*) echo "已是最新：$tag"; exit 0 ;; esac
 echo "目录：$DIR  当前：${have:-无}  最新：$tag"
 
 zip="easytier-linux-$ARCH-$tag.zip"
