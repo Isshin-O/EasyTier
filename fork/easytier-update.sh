@@ -11,6 +11,7 @@
 #   DIR      程序目录（默认从运行中的进程反查，查不到用 /opt/easytier）
 #   SERVICE  服务控制命令，会追加 stop/start（默认自动识别 /etc/init.d/easytier 或 systemd 的 easytier*.service）
 #   ARCH     架构（默认 uname -m）
+#   BASE     安装包和 SHA256SUMS 的来源，可以是本地目录（本机连不上 GitHub 下载时，先从别处拷过来）
 REPO=${REPO:-Isshin-O/EasyTier}
 ARCH=${ARCH:-$(uname -m)}
 LOG=/tmp/easytier-update.log
@@ -45,7 +46,7 @@ svc() {
   elif [ -x /etc/init.d/easytier ]; then
     /etc/init.d/easytier "$1"
   elif command -v systemctl >/dev/null 2>&1; then
-    units=$(systemctl list-units --type=service --all --plain --no-legend 'easytier*' | awk '{print $1}')
+    units=$(systemctl list-units --type=service --all --plain --no-legend 'easytier*' | awk '$2 == "loaded" {print $1}')
     [ -n "$units" ] || { echo "没找到 easytier 的 systemd 服务，请用 SERVICE=... 指定"; return 1; }
     for u in $units; do systemctl "$1" "$u"; done
   else
@@ -68,7 +69,7 @@ on_exit() {
 }
 trap on_exit EXIT
 
-fetch() { wget -q -O "$2" "$1" 2>/dev/null || curl -fsSL -o "$2" "$1"; }
+fetch() { case "$1" in /*) cp "$1" "$2" ;; *) wget -q -O "$2" "$1" 2>/dev/null || curl -fsSL -o "$2" "$1" ;; esac; }
 
 pid=$(pidof easytier-core | awk '{print $1}')
 if [ -z "$DIR" ]; then
@@ -88,7 +89,7 @@ case "v$have" in "$tag" | "$tag"-*) echo "已是最新：$tag"; exit 0 ;; esac
 echo "目录：$DIR  当前：${have:-无}  最新：$tag"
 
 zip="easytier-linux-$ARCH-$tag.zip"
-base="https://github.com/$REPO/releases/download/$tag"
+base=${BASE:-https://github.com/$REPO/releases/download/$tag}
 fetch "$base/$zip" "$WORK/$zip"
 fetch "$base/SHA256SUMS" "$WORK/SHA256SUMS"
 (cd "$WORK" && grep " \*\?$zip\$" SHA256SUMS | sha256sum -c -) || { echo "校验失败，未改动"; exit 1; }
@@ -107,7 +108,10 @@ done
 svc start
 if [ -n "$pid" ]; then
   sleep 10
-  pidof easytier-core >/dev/null || { echo "新版启动失败"; exit 1; }
+  # 同一台机器上可能还有别的 easytier-core，只认这个目录里的。
+  ok=
+  for p in $(pidof easytier-core); do [ "$(readlink "/proc/$p/exe")" = "$DIR/easytier-core" ] && ok=1; done
+  [ -n "$ok" ] || { echo "新版启动失败"; exit 1; }
 fi
 swapped=
 echo "已更新到 $("$DIR/easytier-core" --version)；旧版备份在 $WORK/bak（重启后消失）"
