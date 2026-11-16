@@ -159,6 +159,15 @@ impl ApplicationStorage {
         }
     }
 
+    // Fork: keep the config and only drop the running/desired state.
+    fn mark_stopped(&self, ids: &[Uuid]) {
+        let _mutation = self.mutation.lock().unwrap();
+        for id in ids {
+            self.enabled_networks.remove(id);
+            self.desired_networks.remove(id);
+        }
+    }
+
     fn persist_intent(&self) -> anyhow::Result<()> {
         let _mutation = self.mutation.lock().unwrap();
         if let Some(repository) = &self.repository {
@@ -711,7 +720,9 @@ impl<H: ManagementHost> ApplicationClient<H> {
         ids: &[uuid::Uuid],
     ) -> Result<(), String> {
         // The web client has already removed these instances. Disk failure cannot undo it.
-        self.storage.forget(ids);
+        // Fork: the console sends the same removal for "disable" and "delete", so keep
+        // the config as a stopped network instead of dropping it from the list.
+        self.storage.mark_stopped(ids);
         let effect = self.notify_vpn_stop_if_no_tun(app);
         self.complete(app, true, vec![effect]);
         Ok(())
@@ -1170,8 +1181,10 @@ mod tests {
                 control.running.lock().unwrap().insert(id);
                 client.stop_network(&host, id, true).await.unwrap();
             }
-            assert!(!client.storage.network_configs.contains_key(&id));
+            // Fork: a web removal keeps the config as a stopped network.
+            assert_eq!(client.storage.network_configs.contains_key(&id), web);
             assert!(!client.storage.enabled_networks.contains(&id));
+            assert!(!client.storage.desired_networks.contains(&id));
             assert!(host.0.lock().unwrap().contains(&"vpn_service_stop".into()));
         }
     }
