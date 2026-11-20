@@ -88,6 +88,79 @@ cargo binstall --git https://github.com/EasyTier/EasyTier.git --version 2.6.4 ea
 
 [一键注册系统服务](https://easytier.cn/guide/network/oneclick-install-as-service.html)（系统启动时自动后台运行）
 
+### 🔄 Fork 版更新脚本
+
+本 fork 提供了 `fork/easytier-update.sh`，用来把 OpenWrt、Debian 等 Linux 设备上已装好的 EasyTier 更新到本仓库的 Latest Release。脚本只做更新，不做首次安装：设备上要先有 `easytier-core`，并且已经注册成服务。
+
+#### 下载脚本
+
+用 root 把脚本存到本地：
+
+```sh
+wget -O /root/easytier-update.sh https://raw.githubusercontent.com/Isshin-O/EasyTier/main/fork/easytier-update.sh
+# 没有 wget 时：
+curl -fsSL -o /root/easytier-update.sh https://raw.githubusercontent.com/Isshin-O/EasyTier/main/fork/easytier-update.sh
+```
+
+脚本自身更新时，重新执行上面的下载命令即可。
+
+设备上需要有 `wget` 或 `curl`、`unzip` 和 `sha256sum`。
+
+#### 运行
+
+```sh
+sh /root/easytier-update.sh
+```
+
+不要用 `wget ... | sh` 的方式运行。脚本会把自己转到后台重新执行，需要能找到脚本文件。
+
+转入后台后，即使通过 EasyTier 组网 SSH 进来、更新过程中连接断开，更新也会继续做完。重新连上后看日志：
+
+```sh
+cat /tmp/easytier-update.log
+```
+
+日志最后一行是 `== 结束（退出码 N）`，退出码为 0 表示成功或已是最新。
+
+#### 脚本做了什么
+
+1. 从正在运行的 `easytier-core` 进程反查程序目录；查不到时找 `PATH` 里的 `easytier-core`，再查不到用 `/opt/easytier`。
+2. 读取本仓库 Latest Release 的 tag，和 `easytier-core --version` 比较，版本一致就直接退出。
+3. 下载 `easytier-linux-<架构>-<tag>.zip` 和 `SHA256SUMS`，校验通过、并确认新程序能在本机运行后，才开始替换。
+4. 停止服务，替换目录里已有的 `easytier-core`、`easytier-cli`、`easytier-web`、`easytier-web-embed`（目录里没有的文件不会新增），再启动服务。
+5. 如果更新前 `easytier-core` 在运行，等 10 秒确认新版进程起来了。
+
+替换前出错不会改动任何文件；开始替换后出错，或新版没起来，脚本会自动换回旧版。
+
+旧版文件备份在 `/tmp/easytier-update/bak`，设备重启后会消失。
+
+#### 可选环境变量
+
+| 变量 | 作用 | 默认值 |
+| --- | --- | --- |
+| `DIR` | 程序目录 | 从运行中的进程反查，查不到用 `/opt/easytier` |
+| `SERVICE` | 服务控制命令，脚本会在后面追加 `stop` / `start` | 自动识别 `/etc/init.d/easytier` 或 systemd 的 `easytier*.service` |
+| `ARCH` | 发布包的架构名 | `uname -m` |
+| `BASE` | 安装包和 `SHA256SUMS` 的来源，可以是 URL 或本地目录 | 本仓库对应 tag 的 Release 下载地址 |
+| `REPO` | 从哪个 GitHub 仓库取 Latest Release | `Isshin-O/EasyTier` |
+
+发布包的架构名有 `x86_64`、`aarch64`、`riscv64`、`loongarch64`、`ppc64le`、`armv7hf`、`armv7`、`armhf`、`arm`、`mips`、`mipsel`。`uname -m` 的输出和这些名字对不上时（例如 ARM 设备上的 `armv7l`），需要用 `ARCH` 指定。
+
+示例：
+
+```sh
+# 程序装在 /usr/bin，服务脚本叫 easytier-core
+DIR=/usr/bin SERVICE=/etc/init.d/easytier-core sh /root/easytier-update.sh
+
+# ARMv7 设备
+ARCH=armv7 sh /root/easytier-update.sh
+
+# 设备下载 GitHub Release 文件很慢或失败：先在别的机器下载 zip 和 SHA256SUMS，拷到 /root/pkg
+BASE=/root/pkg sh /root/easytier-update.sh
+```
+
+使用 `BASE` 本地目录时，脚本仍然会访问 GitHub API 查询 Latest 版本号，所以设备需要能连上 `api.github.com`。
+
 ### 🚀 基本用法
 
 #### 使用共享节点快速组网

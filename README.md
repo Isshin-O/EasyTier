@@ -88,6 +88,50 @@ Additional steps:
 
 [One-Click Register Service](https://easytier.cn/en/guide/network/oneclick-install-as-service.html) (Automatically start when the system boots and run in the background)
 
+### 🔄 Fork Update Script
+
+This fork ships `fork/easytier-update.sh`, which updates an existing EasyTier install on OpenWrt, Debian and other Linux devices to this repository's Latest Release. It only updates: `easytier-core` must already be installed and registered as a service.
+
+Save the script as root (run the same command again to update the script itself):
+
+```sh
+wget -O /root/easytier-update.sh https://raw.githubusercontent.com/Isshin-O/EasyTier/main/fork/easytier-update.sh
+# or, without wget:
+curl -fsSL -o /root/easytier-update.sh https://raw.githubusercontent.com/Isshin-O/EasyTier/main/fork/easytier-update.sh
+```
+
+The device needs `wget` or `curl`, `unzip` and `sha256sum`.
+
+Run it from the saved file (not through `wget ... | sh`):
+
+```sh
+sh /root/easytier-update.sh
+```
+
+The update moves to the background, so it finishes even if your SSH session over EasyTier drops. After reconnecting, read `/tmp/easytier-update.log`; its last line is `== 结束（退出码 N）`, where exit code 0 means updated or already up to date.
+
+The script finds the install directory from the running `easytier-core`, compares its `--version` with the Latest Release tag, downloads `easytier-linux-<arch>-<tag>.zip` and `SHA256SUMS`, verifies the checksum, then stops the service, replaces the `easytier-core`, `easytier-cli`, `easytier-web` and `easytier-web-embed` files already in that directory, and starts the service again. If any step after the swap fails, or the new `easytier-core` is not running 10 seconds later (checked only when it was running before the update), it restores the old files; a failure before the swap leaves everything unchanged. The old files are kept in `/tmp/easytier-update/bak` until the next reboot.
+
+Optional environment variables:
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `DIR` | Install directory | Taken from the running process, else `/opt/easytier` |
+| `SERVICE` | Service command; `stop` / `start` is appended | `/etc/init.d/easytier` or systemd `easytier*.service` |
+| `ARCH` | Release package architecture | `uname -m` |
+| `BASE` | URL or local directory holding the zip and `SHA256SUMS` | This repository's release download URL for the tag |
+| `REPO` | GitHub repository to read Latest Release from | `Isshin-O/EasyTier` |
+
+Release architectures are `x86_64`, `aarch64`, `riscv64`, `loongarch64`, `ppc64le`, `armv7hf`, `armv7`, `armhf`, `arm`, `mips` and `mipsel`. Set `ARCH` when `uname -m` does not match one of them (for example `armv7l` on ARM devices):
+
+```sh
+DIR=/usr/bin SERVICE=/etc/init.d/easytier-core sh /root/easytier-update.sh
+ARCH=armv7 sh /root/easytier-update.sh
+BASE=/root/pkg sh /root/easytier-update.sh   # zip and SHA256SUMS copied in by hand
+```
+
+With a local `BASE`, the script still queries `api.github.com` for the Latest version.
+
 ### 🚀 Basic Usage
 
 #### Quick Networking with Shared Nodes
