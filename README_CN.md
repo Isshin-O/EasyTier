@@ -104,6 +104,8 @@ curl -fsSL -o /root/easytier-update.sh https://raw.githubusercontent.com/Isshin-
 
 脚本自身更新时，重新执行上面的下载命令即可。
 
+脚本也可以放在别的路径，运行时换成对应的路径就行，但不要放在 `/tmp/easytier-update/` 里：那是脚本的临时工作目录，每次运行开始时都会被清空。用 `BASE` 指定的本地目录也一样。
+
 设备上需要有 `wget` 或 `curl`、`unzip` 和 `sha256sum`。
 
 #### 运行

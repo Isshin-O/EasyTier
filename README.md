@@ -100,6 +100,8 @@ wget -O /root/easytier-update.sh https://raw.githubusercontent.com/Isshin-O/Easy
 curl -fsSL -o /root/easytier-update.sh https://raw.githubusercontent.com/Isshin-O/EasyTier/main/fork/easytier-update.sh
 ```
 
+You can save the script somewhere else and run it from that path instead, but not inside `/tmp/easytier-update/`: that is the script's work directory, and every run starts by deleting it. The same applies to a local `BASE` directory.
+
 The device needs `wget` or `curl`, `unzip` and `sha256sum`.
 
 Run it from the saved file (not through `wget ... | sh`):
