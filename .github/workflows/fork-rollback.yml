@@ -12,6 +12,19 @@ on:
         description: Release tag to go back to; empty means the one promoted before the current Latest
         required: false
         default: ''
+  # Fork Auto Release calls this when the release it just made fails its
+  # post-release smoke test.
+  workflow_call:
+    inputs:
+      to:
+        type: string
+        required: false
+        default: ''
+      from:
+        description: Only roll back if this release is still Latest
+        type: string
+        required: false
+        default: ''
 
 # Never runs at the same time as Fork Promote.
 concurrency:
@@ -29,6 +42,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       TO: ${{ inputs.to }}
+      FROM: ${{ inputs.from }}
     steps:
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
@@ -42,6 +56,10 @@ jobs:
           repo=$GITHUB_REPOSITORY
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/easytier"
           current=$(gh api "repos/$repo/releases/latest" --jq .tag_name)
+          if [ -n "$FROM" ] && [ "$current" != "$FROM" ]; then
+            echo "::error::Latest is $current, not $FROM; someone changed it, so not rolling back." >&2
+            exit 1
+          fi
           releases=$(gh api --paginate "repos/$repo/releases?per_page=100" \
             --jq '.[] | select((.draft | not) and (.prerelease | not) and .tag_name != "nightly") | [.created_at, .tag_name] | @tsv')
           current_created=$(awk -F'\t' -v t="$current" '$2 == t {print $1}' <<<"$releases")
