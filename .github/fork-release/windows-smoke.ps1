@@ -44,16 +44,23 @@ foreach ($b in 'easytier-cli.exe', 'easytier-web-embed.exe') {
   if ($LASTEXITCODE -eq 0) { Pass "$b starts" } else { Fail "$b does not start" }
 }
 
+# EasyTier refuses loopback peer addresses on Windows (connect fails with
+# os error 10049), so both nodes talk over the runner's own LAN address.
+$lan = (Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway -and $_.NetAdapter.Status -eq 'Up' } |
+  Select-Object -First 1).IPv4Address.IPAddress | Select-Object -First 1
+if (-not $lan) { Fail 'no IPv4 address with a default gateway on this runner'; exit 1 }
+Write-Host "using LAN address $lan"
+
 $secret = "smoke-$(Get-Random)"
-$common = @('--network-name', 'smoke', '--network-secret', $secret, '--stun-servers', '127.0.0.1:11010', '--console-log-level', 'info')
+$common = @('--network-name', 'smoke', '--network-secret', $secret, '--stun-servers', "${lan}:11010", '--console-log-level', 'info')
 $a = Start-Process -FilePath $core -PassThru -NoNewWindow `
   -RedirectStandardOutput "$logs\a.log" -RedirectStandardError "$logs\a.err.log" `
   -ArgumentList ($common + @('--no-tun', '-i', '10.144.0.1', '--hostname', 'smoke-a',
-    '-l', 'tcp://127.0.0.1:11010', '-l', 'udp://127.0.0.1:11010', '-r', '127.0.0.1:15888'))
+    '-l', 'tcp://0.0.0.0:11010', '-l', 'udp://0.0.0.0:11010', '-r', '127.0.0.1:15888'))
 $b = Start-Process -FilePath $core -PassThru -NoNewWindow `
   -RedirectStandardOutput "$logs\b.log" -RedirectStandardError "$logs\b.err.log" `
   -ArgumentList ($common + @('-i', '10.144.0.2', '--hostname', 'smoke-b', '--no-listener',
-    '-p', 'tcp://127.0.0.1:11010', '-r', '127.0.0.1:15889'))
+    '-p', "tcp://${lan}:11010", '-r', '127.0.0.1:15889'))
 
 try {
   $null = Wait-Until 60 'b creates a Wintun adapter with 10.144.0.2' {
