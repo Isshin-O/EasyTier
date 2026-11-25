@@ -1,7 +1,11 @@
-# Fork only, run by hand after testing the `nightly` prerelease on a device.
-# Copies its assets to a release named <version>-<sha8> marked Latest and
-# points ghcr.io/<owner>/easytier:stable at the matching image. Devices only
-# follow Latest and :stable, so this is the one switch that ships an update.
+# Fork only, run by hand. Ships the current `nightly` to devices: copies its
+# assets to a release named <version>-<sha8> marked Latest and points
+# ghcr.io/<owner>/easytier:stable at the matching image. Devices only follow
+# Latest and :stable, so this is the one switch that ships an update.
+#
+# It only ships a nightly that passed Fork Release Check: it reuses a recorded
+# pass for the same commit, or runs the whole check first and stops if any
+# blocking part fails. Fork Rollback undoes it.
 name: Fork Promote
 
 on:
@@ -12,15 +16,99 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  actions: read
   contents: write
   packages: write
 
 jobs:
-  promote:
+  resolve:
     if: github.repository != 'EasyTier/EasyTier'
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.find.outputs.sha }}
+      verified: ${{ steps.find.outputs.verified }}
+      digest: ${{ steps.find.outputs.digest }}
+      sums: ${{ steps.find.outputs.sums }}
+      check_run: ${{ steps.find.outputs.check_run }}
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Find a recorded pass for the current nightly
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/nightly" --jq .object.sha)
+          main=$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          if [ "$sha" != "$main" ]; then
+            echo "::error::nightly is ${sha:0:8} but main is ${main:0:8}; refresh nightly first."
+            exit 1
+          fi
+          gh release download nightly --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --dir now
+          sums_now=$(sha256sum now/SHA256SUMS | cut -d' ' -f1)
+
+          # Only passes recorded by Fork Release Check runs on main count.
+          verified=false
+          for id in $(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=fork-release-verdict-$sha&per_page=100" \
+              --jq '.artifacts[] | select(.expired | not) | .id'); do
+            run=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$id" --jq .workflow_run.id)
+            # A pass counts only from a Fork Release Check (or Promote) run
+            # on main that succeeded, never from a pull request.
+            meta=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run" \
+              --jq '[.path, .head_branch, .event, .conclusion] | join(" ")')
+            read -r path branch event conclusion <<<"$meta"
+            case "$path" in
+              .github/workflows/fork-release-check.yml|.github/workflows/fork-promote.yml) ;;
+              *) echo "ignoring artifact $id from $path"; continue ;;
+            esac
+            if [ "$branch" != main ] || [ "$event" = pull_request ] || [ "$conclusion" != success ]; then
+              echo "ignoring artifact $id from run $run ($meta)"
+              continue
+            fi
+            rm -rf verdict && mkdir verdict
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$id/zip" > verdict.zip
+            unzip -q -o verdict.zip -d verdict
+            digest=$(jq -r .digest verdict/verdict.json)
+            sums=$(jq -r .sums verdict/verdict.json)
+            image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/easytier"
+            if [ "$(jq -r .sha verdict/verdict.json)" = "$sha" ] && [ "$sums" = "$sums_now" ] &&
+               docker buildx imagetools inspect "$image@$digest" >/dev/null 2>&1; then
+              verified=true
+              echo "digest=$digest" >> "$GITHUB_OUTPUT"
+              echo "sums=$sums" >> "$GITHUB_OUTPUT"
+              echo "check_run=$(jq -r .run verdict/verdict.json)" >> "$GITHUB_OUTPUT"
+              echo "Reusing the pass from $(jq -r .run verdict/verdict.json)." | tee -a "$GITHUB_STEP_SUMMARY"
+              break
+            fi
+          done
+          echo "verified=$verified" >> "$GITHUB_OUTPUT"
+          [ "$verified" = true ] || echo "No recorded pass for ${sha:0:8}; running Fork Release Check now." | tee -a "$GITHUB_STEP_SUMMARY"
+
+  check:
+    needs: resolve
+    if: needs.resolve.outputs.verified != 'true'
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+    uses: ./.github/workflows/fork-release-check.yml
+    with:
+      promote: true
+
+  promote:
+    needs: [resolve, check]
+    if: >-
+      always() && needs.resolve.result == 'success' &&
+      (needs.resolve.outputs.verified == 'true' ||
+       (needs.check.result == 'success' && needs.check.outputs.sha == needs.resolve.outputs.sha))
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
+      SHA: ${{ needs.resolve.outputs.sha }}
+      DIGEST: ${{ needs.resolve.outputs.digest || needs.check.outputs.digest }}
+      SUMS: ${{ needs.resolve.outputs.sums || needs.check.outputs.sums }}
+      CHECK_RUN: ${{ needs.resolve.outputs.check_run || format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}
     steps:
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
@@ -32,17 +120,31 @@ jobs:
       - name: Promote nightly to Latest and :stable
         run: |
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/easytier"
-          sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/nightly" --jq .object.sha)
-          gh release download nightly --repo "$GITHUB_REPOSITORY" --dir assets
-          cd assets
-          version=$(ls easytier-linux-x86_64-*.zip | sed 's/^easytier-linux-x86_64-//; s/\.zip$//')
-          tag="${version}-${sha:0:8}"
-          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release $tag already exists." >&2
+          if [ -z "$DIGEST" ] || [ -z "$SUMS" ]; then
+            echo "::error::Fork Release Check did not report an image digest and checksums." >&2
             exit 1
           fi
-          # Fork Docker must have built this exact commit before anything ships.
-          docker buildx imagetools inspect "$image:$tag" >/dev/null
+          # Nothing may have moved since the check.
+          now=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/nightly" --jq .object.sha)
+          if [ "$now" != "$SHA" ]; then
+            echo "::error::nightly moved from ${SHA:0:8} to ${now:0:8} after the check; run Promote again." >&2
+            exit 1
+          fi
+          gh release download nightly --repo "$GITHUB_REPOSITORY" --dir assets
+          cd assets
+          if [ "$(sha256sum SHA256SUMS | cut -d' ' -f1)" != "$SUMS" ]; then
+            echo "::error::nightly assets changed after the check; run Promote again." >&2
+            exit 1
+          fi
+          sha256sum --check --quiet SHA256SUMS
+          version=$(ls easytier-linux-x86_64-*.zip | sed 's/^easytier-linux-x86_64-//; s/\.zip$//')
+          tag="${version}-${SHA:0:8}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Release $tag already exists." >&2
+            exit 1
+          fi
+          docker buildx imagetools inspect "$image@$DIGEST" >/dev/null
+          previous=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true)
 
           # luci-app-easytier downloads easytier-linux-<arch>-<tag>.zip.
           for f in *; do
@@ -51,6 +153,24 @@ jobs:
           done
           rm -f SHA256SUMS
           sha256sum * > SHA256SUMS
-          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$sha" \
-            --title "$tag" --notes "Promoted from nightly at ${sha}." --latest *
-          docker buildx imagetools create -t "$image:stable" "$image:$tag"
+          # Fork Rollback reads the image line to restore exactly this image.
+          cat > ../notes.md <<EOF
+          Promoted from nightly at ${SHA}.
+
+          Image: \`${image}@${DIGEST}\`
+          Checked by: ${CHECK_RUN}
+          Previous Latest: ${previous:-none}
+          EOF
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$SHA" \
+            --title "$tag" --notes-file ../notes.md --latest *
+          # Point both tags at the image that was tested, not whatever Fork
+          # Docker pushed under the same name since then.
+          docker buildx imagetools create -t "$image:$tag" -t "$image:stable" "$image@$DIGEST"
+          {
+            echo "### Promoted \`$tag\`"
+            echo
+            echo "- Release: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$tag (Latest)"
+            echo "- \`:stable\` → \`$image@$DIGEST\`"
+            echo "- Checked by: $CHECK_RUN"
+            echo "- Previous Latest: ${previous:-none}; run Fork Rollback to go back to it."
+          } >> "$GITHUB_STEP_SUMMARY"

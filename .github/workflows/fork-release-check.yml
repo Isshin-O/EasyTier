@@ -1,0 +1,385 @@
+# Fork only: decide whether the current `nightly` is safe to ship.
+#
+# Runs after every successful Fork Docker build, by hand, and from Fork
+# Promote, which only promotes a nightly that passed this check. It never
+# publishes anything; see .github/fork-release/README.md.
+#
+#   gate          nightly == main, every Core/GUI/Mobile/Test job of that
+#                 commit succeeded, the image of that commit exists for amd64
+#                 and arm64, and the commit contains upstream's latest release
+#   linux         multi-node Docker smoke test on amd64 and native arm64
+#   arm64-tests   the upstream test suite on a native arm64 runner
+#   windows       Wintun adapter + ping through the tunnel on Windows x86_64
+#   windows-gui   GUI install and start (reported, does not block)
+#   android       APK install and start in an emulator (reported, does not block)
+#   verdict       records a pass for this commit and image digest
+name: Fork Release Check
+
+on:
+  workflow_run:
+    workflows: [Fork Docker]
+    types: [completed]
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      promote:
+        description: Called by Fork Promote; an existing release tag fails the gate
+        type: boolean
+        default: false
+    outputs:
+      sha:
+        value: ${{ jobs.verdict.outputs.sha }}
+      digest:
+        value: ${{ jobs.verdict.outputs.digest }}
+      sums:
+        value: ${{ jobs.verdict.outputs.sums }}
+  # Exercise the checks themselves when they change, against today's nightly.
+  pull_request:
+    paths:
+      - .github/fork-release/**
+      - .github/workflows/fork-release-check.yml
+      - .github/workflows/fork-promote.yml
+      - .github/workflows/fork-rollback.yml
+
+concurrency:
+  # Only PR runs replace each other; a check called by Promote must never be
+  # cancelled or replaced by a later automatic run.
+  group: fork-release-check-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  actions: read
+  contents: read
+  packages: read
+
+jobs:
+  gate:
+    if: >-
+      github.repository != 'EasyTier/EasyTier' &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.gate.outputs.sha }}
+      sha8: ${{ steps.gate.outputs.sha8 }}
+      tag: ${{ steps.gate.outputs.tag }}
+      image: ${{ steps.gate.outputs.image }}
+      digest: ${{ steps.gate.outputs.digest }}
+      sums: ${{ steps.gate.outputs.sums }}
+      ok: ${{ steps.gate.outputs.ok }}
+      run: ${{ steps.seen.outputs.run }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Check the nightly candidate
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # On a PR the candidate is whatever nightly is today; report only.
+          STRICT: ${{ github.event_name != 'pull_request' }}
+          PROMOTE: ${{ inputs.promote || false }}
+        run: bash .github/fork-release/gate.sh
+
+      # Fork Docker runs after every Nightly, even when nothing changed.
+      - name: Skip a candidate that already passed
+        id: seen
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAME: fork-release-verdict-${{ steps.gate.outputs.sha }}
+          DIGEST: ${{ steps.gate.outputs.digest }}
+        run: |
+          run=true
+          if [ "$GITHUB_EVENT_NAME" = workflow_run ]; then
+            found=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$NAME&per_page=100" \
+              --jq '[.artifacts[] | select(.expired | not)] | length')
+            if [ "$found" -gt 0 ]; then
+              echo "$NAME already passed; nothing to do." | tee -a "$GITHUB_STEP_SUMMARY"
+              run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v5
+        if: steps.seen.outputs.run == 'true'
+        with:
+          name: release-candidate
+          path: candidate/
+          retention-days: 3
+          if-no-files-found: error
+
+  linux:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    name: Linux smoke (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          name: release-candidate
+          path: candidate
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Pull the image by digest
+        env:
+          REF: ${{ needs.gate.outputs.image }}@${{ needs.gate.outputs.digest }}
+        run: |
+          docker pull "$REF"
+          docker tag "$REF" etsmoke-image
+
+      # The image must carry exactly the binaries of the release zip.
+      - name: Compare image binaries with the release zip
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          unzip -q candidate/easytier-linux-"$ARCH"-*.zip -d zip
+          id=$(docker create etsmoke-image)
+          status=0
+          for f in zip/easytier-linux-"$ARCH"/*; do
+            name=$(basename "$f")
+            docker cp -q "$id:/usr/local/bin/$name" "image-$name"
+            if cmp -s "$f" "image-$name"; then echo "same: $name"
+            else echo "::error::$name in the image differs from the release zip"; status=1; fi
+          done
+          docker rm "$id" >/dev/null
+          exit $status
+
+      - name: Smoke test
+        env:
+          SMOKE_LOG_DIR: smoke-logs
+        run: sudo -E bash .github/fork-release/linux-smoke.sh etsmoke-image "${{ needs.gate.outputs.sha8 }}"
+
+      - uses: actions/upload-artifact@v5
+        if: failure()
+        with:
+          name: smoke-logs-${{ matrix.arch }}
+          path: smoke-logs/
+          retention-days: 7
+
+  # Upstream only runs its test suite on x86_64 (gate checks that run).
+  arm64-tests:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    name: Tests (aarch64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+
+      - name: Prepare build environment
+        uses: ./.github/actions/prepare-build
+        with:
+          gui: false
+          pnpm: false
+          token: ${{ github.token }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fork-arm64-tests
+
+      - uses: taiki-e/install-action@nextest
+
+      - name: Build tests
+        run: >-
+          cargo nextest archive --archive-file tests.tar.zst
+          --package easytier --package easytier-core --features full
+
+      # Same system setup and invocation as test.yml.
+      - name: Setup system for test
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bridge-utils miniupnpd miniupnpd-iptables iptables
+          sudo modprobe br_netfilter
+          sudo modprobe tun
+          if [ ! -e /dev/net/tun ]; then
+            sudo mkdir -p /dev/net
+            sudo mknod /dev/net/tun c 10 200
+          fi
+          sudo sysctl net.bridge.bridge-nf-call-iptables=0
+          sudo sysctl net.bridge.bridge-nf-call-ip6tables=0
+          sudo sysctl net.ipv6.conf.lo.disable_ipv6=0
+          sudo ip addr add 2001:db8::2/64 dev lo
+
+      - name: Run tests
+        run: |
+          sudo prlimit --pid $$ --nofile=1048576:1048576
+          sudo -E env "PATH=$PATH" EASYTIER_LINUX_BPF_INTEGRATION=required \
+            cargo nextest run --archive-file tests.tar.zst --profile ci --no-fail-fast
+
+  windows:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    name: Windows smoke (x86_64)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          name: release-candidate
+          path: candidate
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem candidate -Filter 'easytier-windows-x86_64-*.zip' | Select-Object -First 1
+          ./.github/fork-release/windows-smoke.ps1 -Zip $zip.FullName -ExpectVersion '${{ needs.gate.outputs.sha8 }}'
+
+      - uses: actions/upload-artifact@v5
+        if: failure()
+        with:
+          name: windows-logs
+          path: windows-logs/
+          retention-days: 7
+
+  windows-gui:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    name: Windows GUI (reported only)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    outputs:
+      outcome: ${{ steps.gui.outcome }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          name: release-candidate
+          path: candidate
+
+      - name: Install and start the GUI
+        id: gui
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem candidate -Filter 'easytier-gui_*_x64-setup.exe' | Select-Object -First 1
+          ./.github/fork-release/windows-gui.ps1 -Installer $setup.FullName
+
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: windows-gui
+          path: windows-gui/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  android:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    name: Android (reported only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      outcome: ${{ steps.app.outcome }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          name: release-candidate
+          path: candidate
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install and start the app in an emulator
+        id: app
+        continue-on-error: true
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: bash .github/fork-release/android-smoke.sh candidate/app-x86_64-release.apk android-out
+
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: android
+          path: android-out/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  verdict:
+    needs: [gate, linux, arm64-tests, windows, windows-gui, android]
+    if: always() && needs.gate.result == 'success' && needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.verdict.outputs.sha }}
+      digest: ${{ steps.verdict.outputs.digest }}
+      sums: ${{ steps.verdict.outputs.sums }}
+    steps:
+      - name: Decide
+        id: verdict
+        env:
+          GATE_OK: ${{ needs.gate.outputs.ok == 'true' && github.event_name != 'pull_request' }}
+          LINUX: ${{ needs.linux.result }}
+          ARM64_TESTS: ${{ needs.arm64-tests.result }}
+          WINDOWS: ${{ needs.windows.result }}
+          WINDOWS_GUI: ${{ needs.windows-gui.outputs.outcome }}
+          ANDROID: ${{ needs.android.outputs.outcome }}
+          SHA: ${{ needs.gate.outputs.sha }}
+          TAG: ${{ needs.gate.outputs.tag }}
+          DIGEST: ${{ needs.gate.outputs.digest }}
+          SUMS: ${{ needs.gate.outputs.sums }}
+        run: |
+          icon() { [ "$1" = success ] && echo "✅" || echo "❌ ($1)"; }
+          {
+            echo "### Release verdict for \`$TAG\`"
+            echo
+            echo "| Check | Result | Blocks release |"
+            echo "|---|---|---|"
+            echo "| Linux smoke, x86_64 + aarch64 | $(icon "$LINUX") | yes |"
+            echo "| Test suite, aarch64 | $(icon "$ARM64_TESTS") | yes |"
+            echo "| Windows TUN + ping | $(icon "$WINDOWS") | yes |"
+            echo "| Windows GUI start | $(icon "${WINDOWS_GUI:-skipped}") | no |"
+            echo "| Android app start | $(icon "${ANDROID:-skipped}") | no |"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          [ "$WINDOWS_GUI" = success ] || echo "::warning::Windows GUI check did not pass; look before promoting."
+          [ "$ANDROID" = success ] || echo "::warning::Android check did not pass; look before promoting."
+          if [ "$LINUX" != success ] || [ "$ARM64_TESTS" != success ] || [ "$WINDOWS" != success ]; then
+            echo "::error::A blocking check failed; $TAG must not be promoted."
+            exit 1
+          fi
+          # PR runs test the checks, not the candidate; they record no pass.
+          if [ "$GATE_OK" != true ]; then
+            echo "Checks passed (pull request run, no verdict recorded)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          mkdir verdict
+          jq -n --arg sha "$SHA" --arg tag "$TAG" --arg digest "$DIGEST" --arg sums "$SUMS" \
+            --arg run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '{sha: $sha, tag: $tag, digest: $digest, sums: $sums, run: $run}' > verdict/verdict.json
+          cat verdict/verdict.json
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "sums=$SUMS" >> "$GITHUB_OUTPUT"
+          echo "save=true" >> "$GITHUB_OUTPUT"
+          echo "✅ \`$TAG\` may be promoted (image \`$DIGEST\`)." >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v5
+        if: steps.verdict.outputs.save == 'true'
+        with:
+          name: fork-release-verdict-${{ needs.gate.outputs.sha }}
+          path: verdict/
+          retention-days: 30

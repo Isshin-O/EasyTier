@@ -1,0 +1,84 @@
+# Fork only, run by hand: undo a Fork Promote. Marks an earlier promoted
+# release as Latest again and points :stable back at its image, so devices
+# that follow Latest or :stable return to it on their next update. The
+# release being rolled back is kept but turned into a prerelease, so it is
+# never picked as Latest or as a rollback target again. Nothing is deleted.
+name: Fork Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      to:
+        description: Release tag to go back to; empty means the one promoted before the current Latest
+        required: false
+        default: ''
+
+# Never runs at the same time as Fork Promote.
+concurrency:
+  group: fork-promote
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  rollback:
+    if: github.repository != 'EasyTier/EasyTier'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TO: ${{ inputs.to }}
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Roll back Latest and :stable
+        run: |
+          repo=$GITHUB_REPOSITORY
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/easytier"
+          current=$(gh api "repos/$repo/releases/latest" --jq .tag_name)
+          releases=$(gh api --paginate "repos/$repo/releases?per_page=100" \
+            --jq '.[] | select((.draft | not) and (.prerelease | not) and .tag_name != "nightly") | [.created_at, .tag_name] | @tsv')
+          current_created=$(awk -F'\t' -v t="$current" '$2 == t {print $1}' <<<"$releases")
+          if [ -z "$TO" ]; then
+            # The newest full release created before the current Latest.
+            TO=$(awk -F'\t' -v c="$current_created" '$1 < c' <<<"$releases" | sort -r | head -n 1 | cut -f2)
+          fi
+          if [ -z "$TO" ]; then echo "::error::No earlier release to go back to." >&2; exit 1; fi
+          if [ "$TO" = "$current" ]; then echo "::error::$TO is already Latest." >&2; exit 1; fi
+          target=$(gh api "repos/$repo/releases/tags/$TO") || { echo "::error::No release $TO." >&2; exit 1; }
+          if [ "$(jq -r .draft <<<"$target")" = true ]; then echo "::error::$TO is a draft." >&2; exit 1; fi
+
+          # Promote records the exact image digest in the notes; older
+          # releases fall back to the image tagged with the release name.
+          ref=$(jq -r '.body // ""' <<<"$target" | grep -oE "${image}@sha256:[0-9a-f]{64}" | head -n 1)
+          [ -n "$ref" ] || ref="$image:$TO"
+          digest=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' | jq -r .digest)
+          if [ -z "$digest" ] || [ "$digest" = null ]; then
+            echo "::error::Image $ref does not exist; not rolling back." >&2
+            exit 1
+          fi
+          echo "Rolling back $current -> $TO ($image@$digest)"
+
+          gh release edit "$TO" --repo "$repo" --prerelease=false --latest
+          docker buildx imagetools create -t "$image:stable" "$image@$digest"
+          body=$(gh api "repos/$repo/releases/tags/$current" --jq '.body // ""')
+          printf '%s\n\nRolled back to %s on %s by %s.\n' "$body" "$TO" "$(date -u +%FT%TZ)" "$GITHUB_ACTOR" > notes.md
+          gh release edit "$current" --repo "$repo" --prerelease --notes-file notes.md
+
+          latest=$(gh api "repos/$repo/releases/latest" --jq .tag_name)
+          stable=$(docker buildx imagetools inspect "$image:stable" --format '{{json .Manifest}}' | jq -r .digest)
+          [ "$latest" = "$TO" ] || { echo "::error::Latest is $latest, expected $TO." >&2; exit 1; }
+          [ "$stable" = "$digest" ] || { echo "::error::stable is $stable, expected $digest." >&2; exit 1; }
+          {
+            echo "### Rolled back to \`$TO\`"
+            echo
+            echo "- Latest: \`$TO\` (was \`$current\`, now a prerelease)"
+            echo "- \`:stable\` → \`$image@$digest\`"
+            echo "- Devices go back on their next update (the update script installs whatever Latest is)."
+          } >> "$GITHUB_STEP_SUMMARY"
