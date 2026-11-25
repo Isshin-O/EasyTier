@@ -5,11 +5,23 @@
 #
 # It only ships a nightly that passed Fork Release Check: it reuses a recorded
 # pass for the same commit, or runs the whole check first and stops if any
-# blocking part fails. Fork Rollback undoes it.
+# blocking part fails. Fork Rollback undoes it. Fork Auto Release calls it
+# after an upstream release once the nightly has been observed for a day.
 name: Fork Promote
 
 on:
   workflow_dispatch:
+  workflow_call:
+    outputs:
+      tag:
+        description: The release that was created and marked Latest
+        value: ${{ jobs.promote.outputs.tag }}
+      previous:
+        description: The Latest release before this one
+        value: ${{ jobs.promote.outputs.previous }}
+      digest:
+        description: The image digest that :stable now points at
+        value: ${{ jobs.promote.outputs.digest }}
 
 concurrency:
   group: fork-promote
@@ -53,13 +65,14 @@ jobs:
           for id in $(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=fork-release-verdict-$sha&per_page=100" \
               --jq '.artifacts[] | select(.expired | not) | .id'); do
             run=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$id" --jq .workflow_run.id)
-            # A pass counts only from a Fork Release Check (or Promote) run
-            # on main that succeeded, never from a pull request.
+            # A pass counts only from a Fork Release Check (or Promote, or
+            # Auto Release) run on main that succeeded, never from a pull
+            # request.
             meta=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run" \
               --jq '[.path, .head_branch, .event, .conclusion] | join(" ")')
             read -r path branch event conclusion <<<"$meta"
             case "$path" in
-              .github/workflows/fork-release-check.yml|.github/workflows/fork-promote.yml) ;;
+              .github/workflows/fork-release-check.yml|.github/workflows/fork-promote.yml|.github/workflows/fork-auto-release.yml) ;;
               *) echo "ignoring artifact $id from $path"; continue ;;
             esac
             if [ "$branch" != main ] || [ "$event" = pull_request ] || [ "$conclusion" != success ]; then
@@ -103,6 +116,10 @@ jobs:
       (needs.resolve.outputs.verified == 'true' ||
        (needs.check.result == 'success' && needs.check.outputs.sha == needs.resolve.outputs.sha))
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.promote.outputs.tag }}
+      previous: ${{ steps.promote.outputs.previous }}
+      digest: ${{ steps.promote.outputs.digest }}
     env:
       GH_TOKEN: ${{ github.token }}
       SHA: ${{ needs.resolve.outputs.sha }}
@@ -118,6 +135,7 @@ jobs:
           password: ${{ github.token }}
 
       - name: Promote nightly to Latest and :stable
+        id: promote
         run: |
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/easytier"
           if [ -z "$DIGEST" ] || [ -z "$SUMS" ]; then
@@ -166,6 +184,11 @@ jobs:
           # Point both tags at the image that was tested, not whatever Fork
           # Docker pushed under the same name since then.
           docker buildx imagetools create -t "$image:$tag" -t "$image:stable" "$image@$DIGEST"
+          {
+            echo "tag=$tag"
+            echo "previous=$previous"
+            echo "digest=$DIGEST"
+          } >> "$GITHUB_OUTPUT"
           {
             echo "### Promoted \`$tag\`"
             echo

@@ -1,0 +1,189 @@
+# Fork only: ships an upstream release to devices without anyone clicking.
+#
+# Once a day it asks auto-release.sh whether to promote. That needs main to
+# contain an upstream release (vX.Y.Z) that the current Latest does not, a
+# Fork Release Check pass for the nightly at least a day old, and no failed
+# build, test, Docker or check run for that commit since. Everyday nightlies
+# without a new upstream release are never shipped.
+#
+# Then it runs Fork Promote, smoke-tests what devices now get (:stable and the
+# Latest release zips), and if that fails runs Fork Rollback back to the
+# previous Latest. Anything that stops a release turns the run red, which is
+# GitHub's notification to the repository owner.
+name: Fork Auto Release
+
+on:
+  schedule:
+    # 10:23 Asia/Shanghai: after Nightly (03:17), Fork Docker and the check.
+    - cron: '23 2 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Only report the decision; never promote
+        type: boolean
+        default: true
+  # Exercise the decision on changes; a pull request never promotes.
+  pull_request:
+    paths:
+      - .github/fork-release/auto-release.sh
+      - .github/workflows/fork-auto-release.yml
+
+concurrency:
+  group: fork-auto-release
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: write
+  packages: write
+
+jobs:
+  decide:
+    if: github.repository != 'EasyTier/EasyTier'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      release: ${{ steps.decide.outputs.release }}
+      sha: ${{ steps.decide.outputs.sha }}
+      up_tag: ${{ steps.decide.outputs.up_tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Decide whether to promote
+        id: decide
+        # On a pull request the decision is about today's real state, which
+        # the change under review does not cause; report it without failing.
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/fork-release/auto-release.sh
+
+  promote:
+    needs: decide
+    if: >-
+      needs.decide.outputs.release == 'true' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'schedule' ||
+       (github.event_name == 'workflow_dispatch' && !inputs.dry_run))
+    permissions:
+      actions: read
+      contents: write
+      packages: write
+    uses: ./.github/workflows/fork-promote.yml
+
+  # What devices get now: :stable and the Latest release zips.
+  verify:
+    needs: [decide, promote]
+    if: needs.promote.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    name: After release (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.promote.outputs.tag }}
+      DIGEST: ${{ needs.promote.outputs.digest }}
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Latest and :stable point at the new release
+        run: |
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+          [ "$latest" = "$TAG" ] || { echo "::error::Latest is $latest, expected $TAG."; exit 1; }
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/easytier"
+          docker pull "$image:stable"
+          got=$(docker buildx imagetools inspect "$image:stable" --format '{{json .Manifest}}' | jq -r .digest)
+          [ "$got" = "$DIGEST" ] || { echo "::error::stable is $got, expected $DIGEST."; exit 1; }
+          docker tag "$image:stable" etsmoke-image
+
+      - name: Release zip matches its checksum and the image
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir rel \
+            --pattern SHA256SUMS --pattern "easytier-linux-$ARCH-*.zip"
+          (cd rel && sha256sum --check --ignore-missing SHA256SUMS)
+          unzip -q rel/easytier-linux-"$ARCH"-*.zip -d zip
+          id=$(docker create etsmoke-image)
+          status=0
+          for f in zip/easytier-linux-"$ARCH"/*; do
+            name=$(basename "$f")
+            docker cp -q "$id:/usr/local/bin/$name" "image-$name"
+            if cmp -s "$f" "image-$name"; then echo "same: $name"
+            else echo "::error::$name in :stable differs from the $TAG zip"; status=1; fi
+          done
+          docker rm "$id" >/dev/null
+          exit $status
+
+      - name: Smoke test :stable
+        env:
+          SMOKE_LOG_DIR: smoke-logs
+        run: sudo -E bash .github/fork-release/linux-smoke.sh etsmoke-image "${TAG##*-}"
+
+      - uses: actions/upload-artifact@v5
+        if: failure()
+        with:
+          name: after-release-logs-${{ matrix.arch }}
+          path: smoke-logs/
+          retention-days: 14
+
+  rollback:
+    needs: [promote, verify]
+    if: always() && needs.promote.result == 'success' && needs.verify.result != 'success'
+    permissions:
+      contents: write
+      packages: write
+    uses: ./.github/workflows/fork-rollback.yml
+    with:
+      to: ${{ needs.promote.outputs.previous }}
+      from: ${{ needs.promote.outputs.tag }}
+
+  report:
+    needs: [decide, promote, verify, rollback]
+    if: always() && needs.decide.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions: {}
+    env:
+      UP_TAG: ${{ needs.decide.outputs.up_tag }}
+      TAG: ${{ needs.promote.outputs.tag }}
+      PROMOTE: ${{ needs.promote.result }}
+      VERIFY: ${{ needs.verify.result }}
+      ROLLBACK: ${{ needs.rollback.result }}
+    steps:
+      - name: Summary
+        run: |
+          {
+            echo "### Auto release of upstream $UP_TAG"
+            echo
+            echo "| Step | Result |"
+            echo "|---|---|"
+            echo "| Fork Promote | $PROMOTE |"
+            echo "| Smoke test of :stable and the release zips | $VERIFY |"
+            echo "| Fork Rollback | $ROLLBACK |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$PROMOTE" = skipped ]; then
+            echo "Dry run or manual run without promotion; nothing shipped." >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$PROMOTE" != success ]; then
+            echo "::error::Fork Promote failed; nothing was shipped."; exit 1
+          elif [ "$VERIFY" != success ] && [ "$ROLLBACK" = success ]; then
+            echo "::error::$TAG failed its smoke test after release and was rolled back."; exit 1
+          elif [ "$VERIFY" != success ]; then
+            echo "::error::$TAG failed its smoke test after release and the rollback failed too; act now."; exit 1
+          else
+            echo "✅ Shipped \`$TAG\` (upstream $UP_TAG)." >> "$GITHUB_STEP_SUMMARY"
+          fi

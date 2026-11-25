@@ -1,14 +1,33 @@
 # fork 的正式版发布流程
 
 设备只跟 **Latest 发布** 和 **`:stable` 镜像**，所以只有 Fork Promote 会把更新发到设备上。
-现在 Promote 只发通过了 **Fork Release Check** 的 nightly，出了问题用 **Fork Rollback** 一键回到上一个版本。
+Promote 只发通过了 **Fork Release Check** 的 nightly，出了问题用 **Fork Rollback** 一键回到上一个版本。
+上游发了新的正式版后，**Fork Auto Release** 会在观察一天后自动跑 Promote，平时的 nightly 不会自动发。
 
 ```
 Fork Sync（每周）→ Nightly（构建 + 上游测试）→ Fork Docker → Fork Release Check（自动）
                                                                    │ 全部通过才记一条“可发布”
-                                         你手动点 Fork Promote ────┘ 没有记录就当场重新检查一遍
-                                         出问题手动点 Fork Rollback
+            Fork Auto Release（每天 10:23）满足条件就自动 Promote ─┤
+                                         你也可以手动点 Fork Promote ┘ 没有记录就当场重新检查一遍
+                                         出问题手动点 Fork Rollback（自动发布后的冒烟失败会自动回滚）
 ```
+
+## Fork Auto Release 什么时候发
+
+每天北京时间 10:23 运行 `auto-release.sh`，下面几条全满足才发：
+
+1. nightly 就是 main 的头部。
+2. main 里包含一个上游正式 tag（vX.Y.Z），而当前的 Latest 还不包含它，也就是 fork 已经同步到了上游的新正式版。
+   发布的是当时的 main：这个 tag 加上同步时上游 main 在它之后的提交，再加上 fork 自己的提交。
+3. Fork Release Check 对这个提交和这批安装包记过“可发布”。
+4. 从那次通过算起已经满 24 小时（观察期）。
+5. 观察期内，这个提交的 Core、GUI、Mobile、Test、Nightly、Fork Docker、Fork Release Check 没有失败的运行。
+
+不满足 1 到 4 只是“还没到时候”，运行是绿的。检查失败或观察期内有失败，运行会变红，GitHub 会发通知；这种情况不会发布。
+
+发布后马上检查设备会拿到的东西：Latest 是新版本，`:stable` 指向测过的镜像 digest，Latest 里的 Linux zip 和 SHA256SUMS 一致、和镜像里的程序完全相同，然后在 x86_64 和 arm64 上对 `:stable` 再跑一遍 Linux 冒烟。有一项失败就自动跑 Fork Rollback 回到上一个 Latest，并让运行变红。
+
+手动运行时默认只报告判断结果（`dry_run`），取消勾选才会真的发布。PR 上只跑判断，从不发布。
 
 ## Fork Release Check 查什么
 
