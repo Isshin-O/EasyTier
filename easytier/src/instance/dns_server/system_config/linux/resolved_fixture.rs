@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    os::unix::net::UnixStream,
     process::{Child, Command, Stdio},
     sync::{
         Arc, Mutex,
@@ -360,7 +361,9 @@ impl BusDaemon {
             _directory: directory,
         };
         let deadline = Instant::now() + Duration::from_secs(2);
-        while !socket.exists() {
+        // dbus-daemon binds the socket before it listens, so the file can
+        // exist while connections are still refused. Wait until one succeeds.
+        while UnixStream::connect(&socket).is_err() {
             if let Some(status) = daemon.child.try_wait().unwrap() {
                 panic!("private dbus-daemon exited early: {status}");
             }
